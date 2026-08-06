@@ -18,6 +18,9 @@ struct MappingZone: Codable, Identifiable, Hashable {
     var hasWorldMap: Bool
     var hasFloorPlan: Bool
     var hasReferenceImage: Bool
+    /// Set once this zone has been published to the backend. Optional so every
+    /// existing saved zone still decodes unchanged.
+    var remoteBuildingID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -31,7 +34,8 @@ struct MappingZone: Codable, Identifiable, Hashable {
         pathLength: Double = 0,
         hasWorldMap: Bool = false,
         hasFloorPlan: Bool = false,
-        hasReferenceImage: Bool = false
+        hasReferenceImage: Bool = false,
+        remoteBuildingID: UUID? = nil
     ) {
         self.id = id
         self.campus = campus
@@ -45,6 +49,7 @@ struct MappingZone: Codable, Identifiable, Hashable {
         self.hasWorldMap = hasWorldMap
         self.hasFloorPlan = hasFloorPlan
         self.hasReferenceImage = hasReferenceImage
+        self.remoteBuildingID = remoteBuildingID
     }
 
     var displayTitle: String { zoneName.isEmpty ? "Untitled Zone" : zoneName }

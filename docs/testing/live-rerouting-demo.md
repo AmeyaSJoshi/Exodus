@@ -123,12 +123,47 @@ clear   -> rev 23,      route West Exit -> East Exit    OK
 permanent graph rows changed        0
 ```
 
-## Not yet verified
+## Two-device test (verified)
 
-- **Two phones at once.** Only one client has been run. Multi-device behaviour is
-  unproven.
-- **Physical iPhone.** Requires the Mac's LAN address instead of `127.0.0.1`
-  (the app's backend URL field accepts it; ATS already permits local HTTP).
-- **AR arrows reacting to a live block.** The demo screen is 2D. Wiring live state
-  into `GuidanceView` is the next step.
-- **Map publish from the phone.** The demo uses the seeded map.
+Boot a second simulator and launch the app on both:
+
+```bash
+U1=$(xcrun simctl list devices | grep -m1 "iPhone 17 Pro (" | grep -oE "[0-9A-F-]{36}")
+U2=$(xcrun simctl list devices | grep -m1 "iPhone 17 ("     | grep -oE "[0-9A-F-]{36}")
+for U in $U1 $U2; do
+  xcrun simctl boot "$U" 2>/dev/null
+  xcrun simctl install "$U" "$APP"
+  xcrun simctl launch  "$U" com.egress.mapper \
+    -egress.backend.url "http://127.0.0.1:54321" -egress.backend.anonKey "$KEY"
+done
+```
+
+Sign both in, then turn on **Wheelchair accessible only** on the second device
+and block the stairwell from the dashboard.
+
+| | Profile | Before | After block (both rev 25) |
+|---|---|---|---|
+| Device 1 | Standard | East Exit, 24 m via stairwell | "…blocked by an administrator. **Rerouting to West Exit**" — 50 m |
+| Device 2 | Wheelchair | Already West Exit (stairs excluded) | "…changed. **Route unaffected.**" — stays West Exit |
+
+Both received the same event at the same revision and each decided locally what
+it meant for *its own* route. Clearing (rev 27) returned device 1 to East Exit
+and correctly left device 2 alone.
+
+## Not yet verified
+- **Physical iPhone.** Blocked: the Supabase CLI binds its API to `127.0.0.1`
+  only, so `http://<mac-lan-ip>:54321` is refused (verified: `curl` to the LAN
+  address returns no response). A physical phone therefore needs a TCP forwarder
+  on the Mac, an SSH reverse tunnel, or a hosted Supabase project. The app side
+  is ready — the backend URL field accepts any host and ATS already permits
+  local HTTP.
+- **AR arrows reacting to a live block.** The code path exists — `GuidanceView`
+  now takes a `liveService` and subscribes when the zone has been published, and
+  a live block goes through the same reroute that tears down old anchors. It has
+  not been run on a device, because AR navigation needs a saved `ARWorldMap`,
+  which the seeded demo building does not have. To try it: map a zone, publish it
+  (below), then start AR navigation and block a segment from the dashboard.
+- **Map publish from the phone.** Implemented (Saved Maps -> a zone ->
+  **Publish Building Map**): validates the graph, creates a draft, uploads nodes
+  and edges preserving their UUIDs, then calls `publish_map_version`. Not yet
+  exercised end to end.
