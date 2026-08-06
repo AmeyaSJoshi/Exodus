@@ -76,6 +76,7 @@ enum RouteNodeType: String, Codable, CaseIterable, Hashable {
         case .stairwell: self = .stairwell
         case .elevator: self = .elevator
         case .exit: self = .exit
+        case .refugeArea: self = .refugeArea
         }
     }
 }

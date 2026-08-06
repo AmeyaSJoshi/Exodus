@@ -7,6 +7,7 @@ enum WaypointType: String, Codable, CaseIterable, Identifiable, Hashable {
     case stairwell
     case elevator
     case exit
+    case refugeArea
 
     var id: String { rawValue }
 
@@ -17,6 +18,7 @@ enum WaypointType: String, Codable, CaseIterable, Identifiable, Hashable {
         case .stairwell: return "Stairwell"
         case .elevator: return "Elevator"
         case .exit: return "Exit"
+        case .refugeArea: return "Refuge"
         }
     }
 
@@ -27,6 +29,7 @@ enum WaypointType: String, Codable, CaseIterable, Identifiable, Hashable {
         case .stairwell: return "figure.stairs"
         case .elevator: return "arrow.up.arrow.down.square"
         case .exit: return "figure.run.square.stack"
+        case .refugeArea: return "shield.lefthalf.filled"
         }
     }
 
@@ -37,6 +40,7 @@ enum WaypointType: String, Codable, CaseIterable, Identifiable, Hashable {
         case .stairwell: return .purple
         case .elevator: return .teal
         case .exit: return .green
+        case .refugeArea: return .mint
         }
     }
 
@@ -47,6 +51,7 @@ enum WaypointType: String, Codable, CaseIterable, Identifiable, Hashable {
         case .stairwell: return .systemPurple
         case .elevator: return .systemTeal
         case .exit: return .systemGreen
+        case .refugeArea: return .systemMint
         }
     }
 
@@ -60,6 +65,7 @@ enum WaypointType: String, Codable, CaseIterable, Identifiable, Hashable {
         case .stairwell: return "Stairwell"
         case .elevator: return "Elevator"
         case .exit: return "Exit"
+        case .refugeArea: return "Refuge Area"
         }
     }
 }

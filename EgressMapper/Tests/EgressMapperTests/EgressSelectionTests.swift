@@ -241,3 +241,100 @@ final class AccessibilityReroutingTests: XCTestCase {
         XCTAssertTrue(reloaded.requireWheelchairAccessible)
     }
 }
+
+/// Regression: a persisted accessibility constraint made every path illegal
+/// and left the user with a dead end and no way back.
+final class AccessibilityDeadEndRecoveryTests: XCTestCase {
+
+    /// Room -> Stairwell -> Exit, with no step-free alternative and no refuge.
+    private func stairsOnlyBuilding() -> (BuildingGraph, RoutePosition) {
+        func makeNode(_ name: String, _ type: RouteNodeType, z: Float, zoneID: UUID) -> RouteNode {
+            var m = matrix_identity_float4x4
+            m.columns.3 = SIMD4<Float>(0, 1.4, z, 1)
+            return RouteNode(name: name, type: type, position: CodableTransform(m), zoneID: zoneID)
+        }
+        let zoneID = UUID()
+        let room = makeNode("Room 214", .room, z: 0, zoneID: zoneID)
+        let stair = makeNode("Stair A", .stairwell, z: 10, zoneID: zoneID)
+        let exit = makeNode("Exit A", .exit, z: 20, zoneID: zoneID)
+
+        let graph = BuildingGraph(
+            zoneID: zoneID,
+            nodes: [room, stair, exit],
+            edges: [
+                RouteEdge(fromNodeID: room.id, toNodeID: stair.id, distanceMeters: 10,
+                          accessibility: .between(.room, .stairwell)),
+                RouteEdge(fromNodeID: stair.id, toNodeID: exit.id, distanceMeters: 10,
+                          accessibility: .between(.stairwell, .exit)),
+            ]
+        )
+        return (graph, RoutePosition(nodeID: room.id, worldPosition: room.worldPosition))
+    }
+
+    func testStairsOnlyZoneFailsUnderAccessibleProfile() {
+        let (graph, start) = stairsOnlyBuilding()
+        XCTAssertThrowsError(
+            try ShortestPathService.findBestEgressRoute(from: start, graph: graph, profile: .wheelchair)
+        ) { error in
+            guard case RoutingError.noAccessibleRoute = error else {
+                return XCTFail("Expected .noAccessibleRoute, got \(error)")
+            }
+        }
+    }
+
+    func testClearingConstraintsRecoversARoute() throws {
+        let (graph, start) = stairsOnlyBuilding()
+        // What the "Clear constraints" button produces.
+        let cleared = NavigationProfile(audioGuidanceEnabled: true, hapticGuidanceEnabled: true)
+        XCTAssertFalse(cleared.hasAccessibilityConstraints)
+
+        let options = try ShortestPathService.findBestEgressRoute(
+            from: start, graph: graph, profile: cleared
+        )
+        XCTAssertEqual(options.best.destination.name, "Exit A")
+    }
+
+    func testClearingPreservesGuidancePreferences() {
+        let noisy = NavigationProfile(
+            avoidStairs: true, requireWheelchairAccessible: true,
+            audioGuidanceEnabled: false, hapticGuidanceEnabled: true
+        )
+        let cleared = NavigationProfile(
+            audioGuidanceEnabled: noisy.audioGuidanceEnabled,
+            hapticGuidanceEnabled: noisy.hapticGuidanceEnabled
+        )
+        XCTAssertFalse(cleared.hasAccessibilityConstraints)
+        XCTAssertFalse(cleared.audioGuidanceEnabled, "Voice preference must survive clearing")
+        XCTAssertTrue(cleared.hapticGuidanceEnabled)
+    }
+
+    func testRefugeAreaIsNowMappableAndRescuesAccessibleUsers() throws {
+        // A refuge waypoint recorded during mapping must survive migration and
+        // become a valid fallback destination.
+        let zoneID = UUID()
+        func makeWaypoint(_ name: String, _ type: WaypointType, z: Float, index: Int) -> Waypoint {
+            var m = matrix_identity_float4x4
+            m.columns.3 = SIMD4<Float>(0, 1.4, z, 1)
+            return Waypoint(zoneID: zoneID, name: name, type: type, anchorID: UUID(),
+                            transform: CodableTransform(m), pathIndex: index)
+        }
+
+        let waypoints = [
+            makeWaypoint("Refuge Area", .refugeArea, z: -6, index: 0),
+            makeWaypoint("Room 214", .room, z: 0, index: 6),
+            makeWaypoint("Stair A", .stairwell, z: 10, index: 16),
+            makeWaypoint("Exit A", .exit, z: 20, index: 26),
+        ]
+        let graph = GraphMigrator.migrate(zoneID: zoneID, waypoints: waypoints, path: RoutePath())
+
+        XCTAssertEqual(graph.refuges.count, 1)
+
+        let room = graph.nodes.first { $0.name == "Room 214" }!
+        let start = RoutePosition(nodeID: room.id, worldPosition: room.worldPosition)
+        let options = try ShortestPathService.findBestEgressRoute(
+            from: start, graph: graph, profile: .wheelchair
+        )
+        XCTAssertTrue(options.best.isRefugeFallback)
+        XCTAssertEqual(options.best.destination.name, "Refuge Area")
+    }
+}
