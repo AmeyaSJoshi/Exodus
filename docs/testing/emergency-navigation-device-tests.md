@@ -45,7 +45,7 @@ tests; every item requires a physical non-LiDAR iPhone in a real mapped space.
 - [ ] Block every path and confirm an honest failure, not a wrong route
 - [ ] Configure -> Active Hazards lists the report and clears it
 
-## Milestone 5 (not yet built)
+## Milestone 5 (available now)
 
 - [ ] Confirm a detected room sign
 - [ ] Voice report blocks the correct segment after confirmation
@@ -53,6 +53,22 @@ tests; every item requires a physical non-LiDAR iPhone in a real mapped space.
 - [ ] Verify precise AR arrows disappear
 - [ ] Successfully relocalize and resume
 - [ ] Complete the route and receive destination feedback
+- [ ] Grant microphone + speech permission on first voice report
+- [ ] Say "the hallway ahead is blocked" then confirm; route changes
+- [ ] Say "I can't use stairs"; profile updates and stairwell is NOT blocked
+- [ ] Say something unrelated; shown as not understood, nothing changes
+- [ ] Deny speech permission and confirm the buttons still work
+- [ ] Scan a room sign during localization and confirm the match
+- [ ] Scan an unmapped sign and confirm it offers no match
+- [ ] Tracking-lost dialog offers Relocalize / Manual / 2D map
+- [ ] Grant microphone + speech permission on first voice report
+- [ ] Say "the hallway ahead is blocked" -> transcript shown -> confirm -> reroutes
+- [ ] Say "I can't use stairs" -> updates the profile, does NOT block the stairwell
+- [ ] Say something unrelated -> shown as not understood, nothing changes
+- [ ] Deny speech permission and confirm buttons still work
+- [ ] Scan a room sign during localization and confirm the match
+- [ ] Scan an unmapped sign and confirm it offers no match
+- [ ] Tracking-lost dialog offers Relocalize / Manual / 2D map
 
 ## Diagnostics
 

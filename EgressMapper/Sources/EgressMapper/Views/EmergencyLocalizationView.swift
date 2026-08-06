@@ -20,6 +20,7 @@ struct EmergencyLocalizationView: View {
     @State private var estimate: LocationEstimate?
     @State private var errorMessage: String?
     @State private var showManualPicker = false
+    @State private var showScanSign = false
 
     private var relocalized: Bool { manager.didRelocalize }
 
@@ -53,7 +54,16 @@ struct EmergencyLocalizationView: View {
                 }
             }
         }
+        .fullScreenCover(isPresented: $showScanSign) {
+            if let graph {
+                ScanRoomSignView(zone: zone, graph: graph) { position, signEstimate in
+                    showScanSign = false
+                    onLocated(position, signEstimate)
+                }
+            }
+        }
         .alert("Emergency Mode", isPresented: .constant(errorMessage != nil)) {
+            Button("Scan a Room Sign") { errorMessage = nil; showScanSign = true }
             Button("Choose Manually") { errorMessage = nil; showManualPicker = true }
             Button("Back", role: .cancel) { errorMessage = nil; stop(); onCancel() }
         } message: {
@@ -121,6 +131,17 @@ struct EmergencyLocalizationView: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
 
             VStack(spacing: 10) {
+                Button {
+                    manager.stop()
+                    showScanSign = true
+                } label: {
+                    Label("Scan a Room Sign", systemImage: "text.viewfinder")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+
                 Button {
                     showManualPicker = true
                 } label: {

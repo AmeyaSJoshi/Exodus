@@ -41,9 +41,38 @@ final class Announcer {
         synthesizer.speak(utterance)
     }
 
-    func turnCue() { impact.impactOccurred() }
+    /// Distinct haptic patterns so events are distinguishable without looking.
+    enum Cue {
+        case routeStarted, approachingTurn, turnNow, routeChanged, destination, trackingLost
+    }
 
-    func arrivalCue() { success.notificationOccurred(.success) }
+    func haptic(_ cue: Cue) {
+        guard isEnabled else { return }
+        switch cue {
+        case .routeStarted:
+            success.notificationOccurred(.success)
+        case .approachingTurn:
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        case .turnNow:
+            impact.impactOccurred()
+        case .routeChanged:
+            success.notificationOccurred(.warning)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+                self?.impact.impactOccurred()
+            }
+        case .destination:
+            success.notificationOccurred(.success)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.success.notificationOccurred(.success)
+            }
+        case .trackingLost:
+            success.notificationOccurred(.error)
+        }
+    }
+
+    func turnCue() { haptic(.turnNow) }
+
+    func arrivalCue() { haptic(.destination) }
 
     /// Cuts off the current utterance without tearing down the audio session.
     func stopSpeaking() {

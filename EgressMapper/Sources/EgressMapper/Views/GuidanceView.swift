@@ -38,6 +38,9 @@ struct GuidanceView: View {
     @State private var rerouteNotice: String?
     @State private var activeEdges: [RouteEdge] = []
     @State private var showHazardReport = false
+    @State private var showVoiceReport = false
+    @State private var showRecovery = false
+    @State private var wasReliable = true
     @AppStorage("voiceGuidanceEnabled") private var voiceEnabled = true
 
     init(
@@ -100,6 +103,30 @@ struct GuidanceView: View {
         .onChange(of: manager.heightMode) { _, _ in redrawRoute() }
         .onChange(of: manager.heightOffset) { _, _ in redrawRoute() }
         .onChange(of: manager.estimatedFloorY) { _, _ in redrawRoute() }
+        .onChange(of: manager.status.quality) { _, quality in
+            let reliable = manager.status.isReliable
+            // Precise AR geometry is hidden the moment ARKit stops trusting
+            // its own pose — a frozen arrow in the wrong place is dangerous.
+            manager.arView.scene.anchors.forEach { $0.isEnabled = reliable }
+            if wasReliable && !reliable {
+                announcer.haptic(.trackingLost)
+                if quality == .notAvailable || quality == .relocalizing {
+                    showRecovery = true
+                }
+            }
+            wasReliable = reliable
+        }
+        .confirmationDialog(
+            "Tracking lost",
+            isPresented: $showRecovery,
+            titleVisibility: .visible
+        ) {
+            Button("Relocalize") { restart() }
+            Button("Choose Location Manually") { stopAndExit() }
+            Button("Keep using the 2D map", role: .cancel) {}
+        } message: {
+            Text("AR guidance is paused because the phone no longer knows where it is. The route map below is still accurate.")
+        }
         .sheet(isPresented: $showHazardReport) {
             if let graph = repository.routableGraph(for: zone) {
                 HazardReportView(
@@ -111,6 +138,22 @@ struct GuidanceView: View {
                     nextNodeName: update?.nextNode?.name
                 ) { hazard, edgeID in
                     applyHazard(hazard, to: edgeID)
+                }
+            }
+        }
+        .sheet(isPresented: $showVoiceReport) {
+            if let graph = repository.routableGraph(for: zone) {
+                VoiceReportView(
+                    zone: zone,
+                    graph: graph,
+                    routeEdges: activeEdges,
+                    currentLegIndex: engine.legIndex
+                ) { hazard, edgeID in
+                    applyHazard(hazard, to: edgeID)
+                } onAccessibility: { change in
+                    profile = change.apply(to: profile)
+                } onAlternativeExit: {
+                    reroute(for: profile, reason: "Finding another exit.")
                 }
             }
         }
@@ -265,7 +308,13 @@ struct GuidanceView: View {
                             .foregroundStyle(voiceEnabled ? .green : .secondary)
                     }
                     .accessibilityLabel(voiceEnabled ? "Turn voice off" : "Turn voice on")
-                    Button("Exit") { stopAndExit() }
+                    Button {
+                        callEmergencyServices()
+                    } label: {
+                        Image(systemName: "phone.fill").foregroundStyle(.red)
+                    }
+                    .accessibilityLabel("Call emergency services")
+                    Button("End") { stopAndExit() }
                         .font(.caption)
                 }
                 if let update, !update.arrived {
@@ -309,6 +358,7 @@ struct GuidanceView: View {
             Spacer()
 
             if rerouteContext != nil {
+                HStack(spacing: 8) {
                 Button {
                     showHazardReport = true
                 } label: {
@@ -319,6 +369,18 @@ struct GuidanceView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
+
+                Button {
+                    showVoiceReport = true
+                } label: {
+                    Image(systemName: "mic.fill")
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 14)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .accessibilityLabel("Report a problem by voice")
+                }
             }
 
             Button {
@@ -376,6 +438,15 @@ struct GuidanceView: View {
         didRenderRoute = false
         engine = GuidanceEngine(route: activeRoute)
         start()
+    }
+
+    /// Hands off to the system dialler — the app never places a call itself.
+    private func callEmergencyServices() {
+        guard let url = URL(string: "tel://911"), UIApplication.shared.canOpenURL(url) else {
+            errorMessage = "This device cannot place phone calls."
+            return
+        }
+        UIApplication.shared.open(url)
     }
 
     private func stopAndExit() {
