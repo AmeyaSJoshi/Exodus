@@ -1,8 +1,9 @@
 -- Security verification. Run against a local Supabase after `supabase db reset`
--- and after creating admin@egress.test, viewer@egress.test, outsider@egress.test.
+-- Prerequisite: `npx supabase db reset` (the seed creates the three test users).
 --
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/security_checks.sql
 --
+-- Test users are created by seed.sql, so `supabase db reset` alone is enough.
 -- Every check RAISES on failure, so a clean run means all assertions held.
 -- These impersonate users the way PostgREST does: role `authenticated` plus a
 -- request JWT claim carrying the user id.
@@ -271,6 +272,90 @@ begin
         denied := true;
     end;
     perform pg_temp.assert(denied, 'audit log cannot be deleted from a client');
+end $$;
+reset role;
+
+-- MARK: 10. Anonymous access ---------------------------------------------------
+-- The `anon` role is what an unauthenticated client presents. No policy grants
+-- it anything, so every table must read as empty and every write must fail.
+
+do $$
+declare
+    bldg uuid := '33333333-3333-3333-3333-333333333333';
+    edge uuid := 'b0000000-0000-0000-0000-000000000002';
+    visible integer;
+    denied boolean := false;
+begin
+    set local role anon;
+    set local request.jwt.claims = '{"role":"anon"}';
+
+    select count(*) into visible from public.buildings;
+    perform pg_temp.assert(visible = 0, 'anonymous cannot read buildings');
+
+    select count(*) into visible from public.route_nodes;
+    perform pg_temp.assert(visible = 0, 'anonymous cannot read the graph');
+
+    select count(*) into visible from public.live_edge_states;
+    perform pg_temp.assert(visible = 0, 'anonymous cannot read live state');
+
+    select count(*) into visible from public.user_reports;
+    perform pg_temp.assert(visible = 0, 'anonymous cannot read reports');
+
+    begin
+        insert into public.user_reports (building_id, edge_stable_id, report_type)
+        values (bldg, edge, 'smoke');
+    exception when others then
+        denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot file a report');
+end $$;
+reset role;
+
+do $$
+declare
+    bldg uuid := '33333333-3333-3333-3333-333333333333';
+    edge uuid := 'b0000000-0000-0000-0000-000000000002';
+    denied boolean := false;
+begin
+    set local role anon;
+    set local request.jwt.claims = '{"role":"anon"}';
+    begin
+        perform public.set_edge_state(bldg, edge, 'blocked', null, null, 3, null);
+    exception when others then
+        denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot change live state');
+end $$;
+reset role;
+
+-- MARK: 11. Occupant can read what they should ---------------------------------
+
+do $$
+declare
+    bldg uuid := '33333333-3333-3333-3333-333333333333';
+    visible integer;
+    denied boolean := false;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+
+    select count(*) into visible from public.buildings where id = bldg;
+    perform pg_temp.assert(visible = 1, 'occupant can read their own building');
+
+    select count(*) into visible from public.route_nodes;
+    perform pg_temp.assert(visible = 7, 'occupant can read the published graph nodes');
+
+    select count(*) into visible from public.route_edges;
+    perform pg_temp.assert(visible = 6, 'occupant can read the published graph edges');
+
+    perform public.building_state_snapshot(bldg);
+    perform pg_temp.assert(true, 'occupant can fetch a building state snapshot');
+
+    begin
+        perform public.publish_map_version('44444444-4444-4444-4444-444444444444');
+    exception when others then
+        denied := true;
+    end;
+    perform pg_temp.assert(denied, 'occupant cannot publish a map version');
 end $$;
 reset role;
 

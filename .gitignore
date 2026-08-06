@@ -3,3 +3,13 @@
 xcuserdata/
 DerivedData/
 build/
+
+# Node / Supabase CLI
+node_modules/
+.env
+.env.local
+.env.*.local
+
+# Supabase local runtime artifacts
+supabase/.branches/
+supabase/.temp/
