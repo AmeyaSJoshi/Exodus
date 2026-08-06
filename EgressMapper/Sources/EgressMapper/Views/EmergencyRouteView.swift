@@ -18,6 +18,7 @@ struct EmergencyRouteView: View {
     @State private var routeError: String?
     @State private var navigating = false
     @State private var showAlternatives = false
+    @State private var liveService = SupabaseBuildingService()
 
     private var activeRoute: CalculatedRoute? { chosen ?? options?.best }
 
@@ -69,7 +70,8 @@ struct EmergencyRouteView: View {
                     path: path,
                     allWaypoints: waypoints,
                     routeEdges: route.edges,
-                    rerouteContext: .init(start: start)
+                    rerouteContext: .init(start: start),
+                    liveService: zone.remoteBuildingID == nil ? nil : liveService
                 ) {
                     navigating = false
                 }
