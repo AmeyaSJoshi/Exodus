@@ -4,12 +4,20 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
+packages:
+  Supabase:
+    url: https://github.com/supabase/supabase-swift
+    from: 2.0.0
+
 targets:
   EgressMapper:
     type: application
     platform: iOS
     sources:
       - Sources/EgressMapper
+    dependencies:
+      - package: Supabase
+        product: Supabase
     info:
       path: Sources/EgressMapper/Info.plist
       properties:
@@ -21,6 +29,13 @@ targets:
         NSSpeechRecognitionUsageDescription: Spoken reports are converted to text on device to understand phrases like "the hallway ahead is blocked".
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: false
+          NSExceptionDomains:
+            localhost:
+              NSExceptionAllowsInsecureHTTPLoads: true
+            127.0.0.1:
+              NSExceptionAllowsInsecureHTTPLoads: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.egress.mapper
