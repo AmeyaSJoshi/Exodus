@@ -1,5 +1,12 @@
 # Hosted Supabase — minimal setup for physical iPhone testing
 
+> **Steps 1–6 are DONE** for project `egress` (ref in `.env.hosted`, gitignored).
+> Migrations pushed, demo data loaded, both profiles attached, dashboard wired.
+> Remaining: sign in and point the phone at it (steps 7–8).
+>
+> Not verified by me: sign-in, realtime, and the block/clear loop against the
+> hosted project — those need the account passwords, which I do not have.
+
 The local stack binds its API to `127.0.0.1`, so a physical iPhone cannot reach
 it. A free hosted project is the shortest path to testing on a real device.
 
@@ -53,19 +60,26 @@ how you should create users on a hosted project. Instead:
 
 (`outsider@egress.test` is only needed to re-run the isolation checks.)
 
-**b. Run the demo data** in Dashboard → **SQL Editor**, pasting everything from
-`supabase/seed.sql` **except** the `pg_temp.create_test_user` function and the
-three `perform pg_temp.create_test_user(...)` lines.
+**b. Run the demo data.** A hosted-safe copy is generated from `seed.sql` with
+the `auth.users` writes stripped:
 
-**c. Attach the profiles** — in the SQL Editor, replacing the UUIDs with the
-real ones from the Authentication tab:
+```bash
+npx supabase db query --linked --file /tmp/hosted_seed.sql
+```
 
-```sql
-insert into public.profiles (id, organization_id, role, display_name) values
-  ('<ADMIN-USER-UUID>',  '11111111-1111-1111-1111-111111111111', 'admin',  'Admin'),
-  ('<VIEWER-USER-UUID>', '11111111-1111-1111-1111-111111111111', 'viewer', 'Occupant')
+Note `--linked`; without it the CLI silently targets your *local* database.
+
+**c. Attach the profiles** — no need to look up UUIDs by hand; match on email:
+
+```bash
+npx supabase db query --linked "
+insert into public.profiles (id, organization_id, role, display_name)
+select u.id, '11111111-1111-1111-1111-111111111111'::uuid,
+       case when u.email='admin@egress.test' then 'admin' else 'viewer' end,
+       case when u.email='admin@egress.test' then 'Admin' else 'Occupant' end
+from auth.users u where u.email in ('admin@egress.test','viewer@egress.test')
 on conflict (id) do update
-  set organization_id = excluded.organization_id, role = excluded.role;
+  set organization_id = excluded.organization_id, role = excluded.role;"
 ```
 
 Without a `profiles` row a user can see nothing — `current_org_id()` returns
@@ -76,7 +90,8 @@ null and every policy denies. That is the intended default.
 Dashboard → **Project Settings → API**:
 
 - **Project URL** → `https://<ref>.supabase.co`
-- **anon / public key** → safe for the phone and the browser (RLS constrains it)
+- **publishable key** (`sb_publishable_…`, the current name for the anon key) →
+  safe for the phone and the browser; RLS constrains it
 - **service_role key** → never put this in the app, the dashboard, or git
 
 ## 6. Point the dashboard at it
