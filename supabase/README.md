@@ -1,36 +1,28 @@
 # EGRESS Supabase backend
 
-> **Status: NOT YET VERIFIED.** The migrations, seed and security checks have
-> never been executed — this machine has no container runtime, so the local
-> Supabase stack cannot start. See "Prerequisite" below. Do not treat the SQL as
-> working until `db reset` and the security checks have both run green.
+> **Status: VERIFIED** on 2026-08-06 against Supabase CLI 2.111.0 with OrbStack.
+> `db reset` applies all four migrations and the seed with no errors or warnings,
+> and all 29 security assertions pass. Reproduced from a clean reset twice.
 
 ## Layout
 
 - `config.toml` — local stack configuration (`project_id = "egress"`).
 - `migrations/` — schema, RLS, and RPCs. Applied in filename order.
 - `seed.sql` — demo org, building, published map **and the three test users**.
-- `tests/security_checks.sql` — 29 assertions; raises on the first failure.
+- `verification/security_checks.sql` — 29 assertions; raises on the first failure.
+  Kept out of `supabase/tests/` because that directory is for pgTAP, and these
+  are plain psql assertions — `supabase test db` would report a parse failure.
 
 ## Prerequisite: a container runtime
 
-The Supabase CLI is pinned per-repo (`npm install --save-dev supabase`, currently
-2.111.0) and needs Docker or Podman. This machine has neither.
-
-**One manual step — pick either:**
+The Supabase CLI is pinned per-repo (`npm install --save-dev supabase`, 2.111.0)
+and needs Docker or Podman. Verified with **OrbStack**:
 
 ```bash
-brew install --cask orbstack     # lighter and faster on macOS; recommended
+brew install --cask orbstack     # or: brew install --cask docker
 ```
 
-or
-
-```bash
-brew install --cask docker       # Docker Desktop
-```
-
-Both are large GUI applications. After installing, **launch the app once** so its
-daemon starts and puts `docker` on your `PATH`, then continue below.
+Launch it once so its daemon starts and `docker` is on your `PATH`.
 
 ## Reproducible setup — two commands
 
@@ -61,11 +53,21 @@ localhost. They are not secrets and must never be used anywhere else.
 ## Verification
 
 ```bash
-export DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:54322/postgres'
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/security_checks.sql
+npm run db:verify
 ```
 
-A clean run ends with `All security checks passed.` The checks cover:
+which runs the checks through the stack's own psql, so a local `psql` install is
+not required:
+
+```bash
+docker exec -i supabase_db_egress psql -U postgres -v ON_ERROR_STOP=1 \
+  < supabase/verification/security_checks.sql
+```
+
+A clean run ends with `All security checks passed.` To see each assertion,
+change `client_min_messages` to `notice` at the top of the file.
+
+The checks cover:
 
 1. Occupants cannot insert live state directly, or via the RPC.
 2. Admin writes succeed and `revision` increases monotonically.
@@ -80,12 +82,21 @@ A clean run ends with `All security checks passed.` The checks cover:
 11. Anonymous (`anon`) reads are empty and anonymous writes fail.
 12. Occupants can read the published graph and fetch a snapshot, but cannot publish.
 
-If `psql` is not installed, use the one bundled with the stack:
+### Verified denial reasons
 
-```bash
-docker exec -i supabase_db_egress psql -U postgres -v ON_ERROR_STOP=1 \
-  < supabase/tests/security_checks.sql
-```
+Assertions that expect a refusal catch any exception, so the actual messages were
+inspected to confirm each denial is the *right* one:
+
+| Attempt | Refused by |
+|---|---|
+| Occupant calls `set_edge_state` | `Not authorised to change live state for this building` |
+| Admin of another org calls it | same explicit check (org mismatch) |
+| Occupant inserts into `live_edge_states` | `new row violates row-level security policy` |
+| Anonymous reads `buildings` | `permission denied for table buildings` |
+
+### pgTAP
+
+There are no pgTAP tests; `npx supabase test db` reports `NOTESTS`.
 
 ## Identity model
 
@@ -98,6 +109,17 @@ the map.
 
 A single global sequence stamps `revision` on every live-state write. Clients
 keep one integer watermark and discard any event at or below it.
+
+## Grants
+
+RLS decides *which rows* a role may touch; `GRANT` decides whether it may touch
+the table at all, and migration-created tables get no default privileges. Without
+`20260806000400_grants.sql` every policy is unreachable — the first verification
+run failed with `permission denied for table buildings`. The failure was safe but
+the API was unusable.
+
+`anon` is granted nothing, so unauthenticated access is refused outright rather
+than merely filtered to zero rows.
 
 ## Secrets
 

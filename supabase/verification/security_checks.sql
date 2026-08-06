@@ -276,55 +276,61 @@ end $$;
 reset role;
 
 -- MARK: 10. Anonymous access ---------------------------------------------------
--- The `anon` role is what an unauthenticated client presents. No policy grants
--- it anything, so every table must read as empty and every write must fail.
+-- `anon` is the role an unauthenticated client presents. It holds no GRANT at
+-- all, so every access must be refused outright rather than merely filtered.
 
 do $$
 declare
     bldg uuid := '33333333-3333-3333-3333-333333333333';
     edge uuid := 'b0000000-0000-0000-0000-000000000002';
-    visible integer;
-    denied boolean := false;
+    n integer;
+    denied boolean;
 begin
     set local role anon;
     set local request.jwt.claims = '{"role":"anon"}';
 
-    select count(*) into visible from public.buildings;
-    perform pg_temp.assert(visible = 0, 'anonymous cannot read buildings');
+    denied := false;
+    begin
+        select count(*) into n from public.buildings;
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot read buildings');
 
-    select count(*) into visible from public.route_nodes;
-    perform pg_temp.assert(visible = 0, 'anonymous cannot read the graph');
+    denied := false;
+    begin
+        select count(*) into n from public.route_nodes;
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot read the graph');
 
-    select count(*) into visible from public.live_edge_states;
-    perform pg_temp.assert(visible = 0, 'anonymous cannot read live state');
+    denied := false;
+    begin
+        select count(*) into n from public.live_edge_states;
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot read live state');
 
-    select count(*) into visible from public.user_reports;
-    perform pg_temp.assert(visible = 0, 'anonymous cannot read reports');
-
+    denied := false;
     begin
         insert into public.user_reports (building_id, edge_stable_id, report_type)
         values (bldg, edge, 'smoke');
-    exception when others then
-        denied := true;
+    exception when others then denied := true;
     end;
     perform pg_temp.assert(denied, 'anonymous cannot file a report');
-end $$;
-reset role;
 
-do $$
-declare
-    bldg uuid := '33333333-3333-3333-3333-333333333333';
-    edge uuid := 'b0000000-0000-0000-0000-000000000002';
-    denied boolean := false;
-begin
-    set local role anon;
-    set local request.jwt.claims = '{"role":"anon"}';
+    denied := false;
     begin
         perform public.set_edge_state(bldg, edge, 'blocked', null, null, 3, null);
-    exception when others then
-        denied := true;
+    exception when others then denied := true;
     end;
     perform pg_temp.assert(denied, 'anonymous cannot change live state');
+
+    denied := false;
+    begin
+        perform public.building_state_snapshot(bldg);
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot fetch a snapshot');
 end $$;
 reset role;
 

@@ -7,8 +7,8 @@
 -- LOCAL DEVELOPMENT ONLY. These are throwaway credentials for a database that
 -- listens on localhost. Never run this against a hosted project.
 
--- pgcrypto lives in the `extensions` schema on Supabase.
-set local search_path = public, extensions;
+-- pgcrypto lives in the `extensions` schema on Supabase, so crypt()/gen_salt()
+-- are called schema-qualified rather than relying on search_path.
 
 -- MARK: Reproducible test users ----------------------------------------------
 
