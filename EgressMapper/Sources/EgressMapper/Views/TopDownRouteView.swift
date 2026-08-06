@@ -107,6 +107,24 @@ struct TopDownRouteView: View {
         return b
     }
 
+    /// Inverse of `fitTransform` — turns a tap in view space back into map
+    /// space so the user can indicate where they are.
+    static func inverseFitTransform(bounds: Bounds, into size: CGSize, padding: Double) -> (CGPoint) -> MapPoint {
+        let usableW = max(Double(size.width) - padding * 2, 1)
+        let usableH = max(Double(size.height) - padding * 2, 1)
+        let scale = min(usableW / bounds.width, usableH / bounds.height)
+        let offsetX = (Double(size.width) - bounds.width * scale) / 2
+        let offsetY = (Double(size.height) - bounds.height * scale) / 2
+
+        return { point in
+            guard scale > 1e-9 else { return MapPoint(x: bounds.minX, y: bounds.minY) }
+            return MapPoint(
+                x: (Double(point.x) - offsetX) / scale + bounds.minX,
+                y: (Double(point.y) - offsetY) / scale + bounds.minY
+            )
+        }
+    }
+
     /// Uniform scale-to-fit that preserves aspect ratio so the sketch is not
     /// stretched into a misleading shape.
     static func fitTransform(bounds: Bounds, into size: CGSize, padding: Double) -> (MapPoint) -> CGPoint {

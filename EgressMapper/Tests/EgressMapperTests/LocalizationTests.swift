@@ -246,3 +246,49 @@ final class LocalizationRoutingIntegrationTests: XCTestCase {
         XCTAssertEqual(before, c.graph)
     }
 }
+
+final class MapTapInverseTests: XCTestCase {
+
+    private var bounds: TopDownRouteView.Bounds {
+        TopDownRouteView.bounds(of: [
+            MapPoint(x: 0, y: 0), MapPoint(x: 20, y: 0), MapPoint(x: 20, y: 10),
+        ])
+    }
+
+    func testInverseUndoesForwardTransform() {
+        let size = CGSize(width: 300, height: 200)
+        let forward = TopDownRouteView.fitTransform(bounds: bounds, into: size, padding: 24)
+        let inverse = TopDownRouteView.inverseFitTransform(bounds: bounds, into: size, padding: 24)
+
+        for original in [MapPoint(x: 3, y: 2), MapPoint(x: 17.5, y: 9), MapPoint(x: 0, y: 0)] {
+            let back = inverse(forward(original))
+            XCTAssertEqual(back.x, original.x, accuracy: 1e-6)
+            XCTAssertEqual(back.y, original.y, accuracy: 1e-6)
+        }
+    }
+
+    func testTapMapsIntoGraphSpaceAndSnaps() {
+        let c = Corridor()
+        let size = CGSize(width: 300, height: 300)
+        let allPoints = c.graph.nodes.map(\.mapPoint)
+        let b = TopDownRouteView.bounds(of: allPoints)
+        let forward = TopDownRouteView.fitTransform(bounds: b, into: size, padding: 24)
+        let inverse = TopDownRouteView.inverseFitTransform(bounds: b, into: size, padding: 24)
+
+        // Tap exactly where the intersection is drawn.
+        let tapped = inverse(forward(c.intersection.mapPoint))
+        let world = SIMD3<Float>(Float(tapped.x), 0, Float(tapped.y))
+        let estimate = LocalizationService.estimate(worldPosition: world, graph: c.graph)
+
+        XCTAssertEqual(estimate.routePosition.nodeID, c.intersection.id)
+    }
+
+    func testDegenerateBoundsDoNotProduceNaN() {
+        let single = TopDownRouteView.bounds(of: [MapPoint(x: 5, y: 5)])
+        let inverse = TopDownRouteView.inverseFitTransform(
+            bounds: single, into: CGSize(width: 100, height: 100), padding: 10
+        )
+        let p = inverse(CGPoint(x: 50, y: 50))
+        XCTAssertTrue(p.x.isFinite && p.y.isFinite)
+    }
+}
