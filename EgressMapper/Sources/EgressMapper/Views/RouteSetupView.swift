@@ -18,14 +18,8 @@ struct RouteSetupView: View {
     @State private var navigating = false
     @State private var aligningFloorPlan = false
 
-    /// Waypoints for the route the router picked, in order.
-    private var route: [Waypoint] {
-        guard let calculated else { return [] }
-        // Node ids equal waypoint ids, so this mapping is exact.
-        return calculated.nodes.compactMap { node in
-            waypoints.first { $0.id == node.id }
-        }
-    }
+    /// The router's chosen path, as graph nodes.
+    private var route: [RouteNode] { calculated?.nodes ?? [] }
 
     /// A confirmed emergency position wins over the manual picker, so a
     /// mid-hallway start routes from where the user actually stands.

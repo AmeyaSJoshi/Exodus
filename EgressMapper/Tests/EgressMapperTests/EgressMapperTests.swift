@@ -138,11 +138,17 @@ private func makeWaypoint(
 }
 
 final class GuidanceEngineTests: XCTestCase {
-    private func straightRoute() -> [Waypoint] {
+    private func makeNode(_ name: String, _ type: RouteNodeType, x: Float, z: Float) -> RouteNode {
+        var m = matrix_identity_float4x4
+        m.columns.3 = SIMD4<Float>(x, 1.4, z, 1)
+        return RouteNode(name: name, type: type, position: CodableTransform(m), zoneID: UUID())
+    }
+
+    private func straightRoute() -> [RouteNode] {
         [
-            makeWaypoint("Room 214", .room, x: 0, z: 0, index: 0),
-            makeWaypoint("Intersection", .intersection, x: 0, z: 10, index: 10),
-            makeWaypoint("Exit A", .exit, x: 10, z: 10, index: 20),
+            makeNode("Room 214", .room, x: 0, z: 0),
+            makeNode("Intersection", .intersection, x: 0, z: 10),
+            makeNode("Exit A", .exit, x: 10, z: 10),
         ]
     }
 
@@ -153,7 +159,7 @@ final class GuidanceEngineTests: XCTestCase {
 
         let atIntersection = engine.update(position: SIMD3<Float>(0, 1.4, 10))
         XCTAssertEqual(engine.legIndex, 1)
-        XCTAssertEqual(atIntersection.nextWaypoint?.name, "Exit A")
+        XCTAssertEqual(atIntersection.nextNode?.name, "Exit A")
     }
 
     func testArrivalAtDestination() {
@@ -174,7 +180,7 @@ final class GuidanceEngineTests: XCTestCase {
         var engine = GuidanceEngine(route: [])
         let u = engine.update(position: .zero)
         XCTAssertFalse(u.arrived)
-        XCTAssertNil(u.nextWaypoint)
+        XCTAssertNil(u.nextNode)
     }
 
     func testTurnDirections() {

@@ -132,7 +132,7 @@ enum ARRouteRenderer {
     /// arrows down long straight runs, and a destination label.
     @discardableResult
     static func renderRoute(
-        _ route: [Waypoint],
+        _ route: [RouteNode],
         in arView: ARView,
         groundY: Float?,
         mode: MarkerHeightMode,
@@ -142,9 +142,9 @@ enum ARRouteRenderer {
         guard route.count > 1 else { return [] }
         var placed: [AnchorEntity] = []
 
-        func resolved(_ w: Waypoint) -> SIMD3<Float> {
-            var p = w.position
-            p.y = placementY(capturedY: w.position.y, groundY: groundY, mode: mode, offset: offset)
+        func resolved(_ w: RouteNode) -> SIMD3<Float> {
+            var p = w.worldPosition
+            p.y = placementY(capturedY: w.worldPosition.y, groundY: groundY, mode: mode, offset: offset)
             return p
         }
 

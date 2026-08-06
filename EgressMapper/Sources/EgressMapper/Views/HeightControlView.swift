@@ -56,3 +56,41 @@ struct HeightControlView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 }
+
+/// Fast-access accessibility controls, reachable during active navigation.
+struct AccessibilitySheet: View {
+    @Binding var profile: NavigationProfile
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Button {
+                        profile.avoidStairs = true
+                        profile.requireWheelchairAccessible = true
+                    } label: {
+                        Label("I Need an Accessible Route", systemImage: "figure.roll")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .disabled(profile.avoidStairs && profile.requireWheelchairAccessible)
+                }
+
+                Section {
+                    Toggle("Avoid stairs", isOn: $profile.avoidStairs)
+                    Toggle("Wheelchair accessible only", isOn: $profile.requireWheelchairAccessible)
+                    Toggle("Avoid elevators", isOn: $profile.avoidElevators)
+                } footer: {
+                    Text("Rerouting happens immediately. If no route satisfies these, you will be told — the preference is never silently dropped.")
+                }
+            }
+            .navigationTitle("Accessibility")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}

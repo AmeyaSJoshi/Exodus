@@ -58,10 +58,10 @@ struct EmergencyZoneSelectView: View {
             .environment(repository)
         }
         .navigationDestination(item: $located) { start in
-            RouteSetupView(
+            EmergencyRouteView(
                 zone: start.zone,
-                presetStart: start.position,
-                presetEstimate: start.estimate
+                start: start.position,
+                estimate: start.estimate
             )
         }
         .navigationDestination(item: $selected) { zone in

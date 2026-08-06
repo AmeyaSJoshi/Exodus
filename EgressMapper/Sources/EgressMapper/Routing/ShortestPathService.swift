@@ -55,19 +55,51 @@ enum ShortestPathService {
         )
     }
 
+    /// An exit that exists on the map but cannot be routed to right now.
+    struct UnreachableExit: Hashable {
+        var node: RouteNode
+        var reason: String
+    }
+
+    /// Every egress option, ranked, plus the exits that had to be ruled out.
+    struct EgressOptions {
+        var best: CalculatedRoute
+        var alternatives: [CalculatedRoute]
+        var unreachable: [UnreachableExit]
+
+        /// e.g. "Routing to West Exit — 64 m. East Exit is unavailable."
+        var summary: String {
+            var text = best.explanation
+            if !unreachable.isEmpty {
+                let names = unreachable.map(\.node.name)
+                let list = names.count == 1
+                    ? names[0]
+                    : names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+                text += " \(list) \(names.count == 1 ? "is" : "are") unavailable."
+            }
+            return text
+        }
+    }
+
     /// Evaluates every exit and returns the cheapest reachable one, falling
     /// back to an area of refuge when no exit can be reached.
     static func findBestEgressRoute(
         from start: RoutePosition,
         graph: BuildingGraph,
         profile: NavigationProfile
-    ) throws -> (best: CalculatedRoute, alternatives: [CalculatedRoute]) {
+    ) throws -> EgressOptions {
         guard !graph.isEmpty else { throw RoutingError.emptyGraph }
 
         var routes: [CalculatedRoute] = []
+        var unreachable: [UnreachableExit] = []
+
         for exit in graph.exits {
-            if let route = try? findRoute(from: start, to: exit.id, graph: graph, profile: profile) {
-                routes.append(route)
+            do {
+                routes.append(try findRoute(from: start, to: exit.id, graph: graph, profile: profile))
+            } catch {
+                unreachable.append(
+                    UnreachableExit(node: exit, reason: error.localizedDescription)
+                )
             }
         }
 
@@ -87,7 +119,11 @@ enum ShortestPathService {
         }
 
         routes.sort { $0.totalDistanceMeters < $1.totalDistanceMeters }
-        return (routes[0], Array(routes.dropFirst()))
+        return EgressOptions(
+            best: routes[0],
+            alternatives: Array(routes.dropFirst()),
+            unreachable: unreachable
+        )
     }
 
     // MARK: - Start resolution

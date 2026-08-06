@@ -7,7 +7,7 @@ struct TopDownRouteView: View {
     let waypoints: [Waypoint]
     var currentPosition: MapPoint?
     var currentHeading: Float = 0
-    var highlightedRoute: [Waypoint] = []
+    var highlightedRoute: [RouteNode] = []
 
     var body: some View {
         Canvas { context, size in
