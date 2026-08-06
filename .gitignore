@@ -18,3 +18,5 @@ dashboard/node_modules/
 dashboard/apitest.mjs
 dashboard/rtdiag.mjs
 dashboard/block.mjs
+.env.hosted
+dashboard/.env.local
