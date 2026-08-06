@@ -14,11 +14,18 @@ final class SupabaseBuildingService: BuildingStateService {
     private(set) var graph: BuildingGraph?
     private(set) var lastError: String?
     private(set) var usingCache = false
+    private(set) var profile: UserProfile = .empty
+    private(set) var catalog: [CatalogBuilding] = []
+    /// Map version cached per building, so Saved Maps can show update state.
+    private(set) var cachedVersions: [UUID: Int] = [:]
 
     /// Emitted when live state changes in a way the UI should react to.
     var onStateChanged: ((LiveEdgeState?) -> Void)?
 
     private var client: SupabaseClient?
+    /// Exposed so map publishing reuses this authenticated session rather than
+    /// creating a second client.
+    var currentClient: SupabaseClient? { client }
     private var channel: RealtimeChannelV2?
     private var listenTask: Task<Void, Never>?
     private var currentBuildingID: UUID?
@@ -45,6 +52,54 @@ final class SupabaseBuildingService: BuildingStateService {
         let session = try await client.auth.signIn(email: email, password: password)
         signedInEmail = session.user.email
         lastError = nil
+    }
+
+    /// Role and organization come from the server, never from user input.
+    func loadProfile() async throws {
+        guard let client else { throw BackendError.notConfigured }
+        profile = try await client.rpc("my_profile").execute().value
+    }
+
+    /// Every published building in the caller's organization (plus drafts if
+    /// they are an administrator).
+    func loadCatalog() async throws {
+        guard let client else { throw BackendError.notConfigured }
+        catalog = try await client.rpc("organization_buildings").execute().value
+        cachedVersions = cache.loadVersions()
+    }
+
+    struct NewBuilding: Encodable {
+        var p_name: String
+        var p_address: String?
+        var p_description: String?
+    }
+
+    /// Creates a building in the caller's own organization.
+    @discardableResult
+    func createBuilding(name: String, address: String?, description: String?) async throws -> CatalogBuilding {
+        guard let client else { throw BackendError.notConfigured }
+        let row: RemoteBuilding = try await client
+            .rpc("create_building", params: NewBuilding(
+                p_name: name,
+                p_address: address?.isEmpty == true ? nil : address,
+                p_description: description?.isEmpty == true ? nil : description
+            ))
+            .single()
+            .execute()
+            .value
+        try await loadCatalog()
+        return CatalogBuilding(
+            id: row.id, name: row.name, address: row.address, description: nil,
+            status: "draft", activeMapVersionID: nil, version: nil, publishedAt: nil,
+            nodeCount: 0, artifactCount: 0
+        )
+    }
+
+    /// Records that this device now holds `version` of a building's map.
+    func markCached(buildingID: UUID, version: Int?) {
+        guard let version else { return }
+        cachedVersions[buildingID] = version
+        cache.saveVersion(version, buildingID: buildingID)
     }
 
     func signOut() async {
@@ -95,6 +150,9 @@ final class SupabaseBuildingService: BuildingStateService {
             graph = built
             usingCache = false
             cache.saveGraph(built, buildingID: building.id)
+            if let match = catalog.first(where: { $0.id == building.id }) {
+                markCached(buildingID: building.id, version: match.version)
+            }
         } catch {
             // Offline: keep going on cached data rather than failing the user.
             if let cached = cache.loadGraph(buildingID: building.id) {

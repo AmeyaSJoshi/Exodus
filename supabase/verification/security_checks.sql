@@ -365,4 +365,128 @@ begin
 end $$;
 reset role;
 
+-- MARK: 12. Buildings workflow -------------------------------------------------
+
+do $$
+declare n integer; denied boolean := false; b public.buildings;
+begin
+    perform pg_temp.act_as('admin@egress.test');
+    select * into b from public.create_building('Test Hall', '1 Test St', 'created by checks');
+    perform pg_temp.assert(b.id is not null, 'admin can create a building');
+    perform pg_temp.assert(b.status = 'draft', 'a new building starts as a draft');
+    perform pg_temp.assert(
+        b.organization_id = '11111111-1111-1111-1111-111111111111',
+        'building lands in the caller''s own organization, not a supplied one');
+
+    select count(*) into n from public.floors where building_id = b.id;
+    perform pg_temp.assert(n = 1, 'a default floor is created automatically');
+end $$;
+reset role;
+
+do $$
+declare denied boolean := false;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+    begin
+        perform public.create_building('Student Hall', null, null);
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'student cannot create a building');
+end $$;
+reset role;
+
+do $$
+declare denied boolean := false; updated integer;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+    begin
+        update public.buildings set name = 'Hacked' where id = '33333333-3333-3333-3333-333333333333';
+        get diagnostics updated = row_count;
+        denied := (updated = 0);
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'student cannot edit a building');
+
+    denied := false;
+    begin
+        perform public.publish_map_version('44444444-4444-4444-4444-444444444444');
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'student cannot publish a map version');
+end $$;
+reset role;
+
+-- Draft buildings and draft artifacts must be invisible to occupants.
+do $$
+declare n integer; draft_version uuid; draft_building uuid;
+begin
+    perform pg_temp.act_as('admin@egress.test');
+    select id into draft_building from public.buildings where status = 'draft' order by created_at desc limit 1;
+    select id into draft_version from public.create_draft_map_version(draft_building);
+    insert into public.map_artifacts (map_version_id, building_id, kind, storage_path, byte_size)
+    values (draft_version, draft_building, 'worldmap', draft_building || '/' || draft_version || '/w.arexperience', 10);
+end $$;
+reset role;
+
+do $$
+declare n integer;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+    select count(*) into n from public.buildings where status = 'draft';
+    perform pg_temp.assert(n = 0, 'student cannot see draft buildings');
+
+    select count(*) into n from public.map_artifacts;
+    perform pg_temp.assert(n = 0, 'student cannot read draft map artifacts');
+
+    select count(*) into n from public.organization_buildings() ob,
+        jsonb_array_elements(ob) e where e ->> 'status' = 'published';
+    perform pg_temp.assert(n >= 1, 'student sees published buildings in their organization');
+end $$;
+reset role;
+
+do $$
+declare n integer;
+begin
+    perform pg_temp.act_as('outsider@egress.test');
+    select jsonb_array_length(public.organization_buildings()) into n;
+    perform pg_temp.assert(n = 0, 'other organization sees no buildings');
+
+    select count(*) into n from public.floors;
+    perform pg_temp.assert(n = 0, 'other organization cannot read floors');
+
+    select count(*) into n from public.map_artifacts;
+    perform pg_temp.assert(n = 0, 'other organization cannot read map artifacts');
+end $$;
+reset role;
+
+do $$
+declare denied boolean := false; r jsonb;
+begin
+    set local role anon;
+    set local request.jwt.claims = '{"role":"anon"}';
+    begin
+        perform public.organization_buildings();
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot list organization buildings');
+
+    denied := false;
+    begin
+        select count(*) from public.floors into denied;
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot read floors');
+end $$;
+reset role;
+
+do $$
+declare r jsonb;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+    r := public.my_profile();
+    perform pg_temp.assert(r ->> 'role' = 'viewer', 'my_profile reports the caller''s role');
+    perform pg_temp.assert(r ->> 'organization_id' is not null, 'my_profile reports the organization');
+end $$;
+reset role;
+
 \echo 'All security checks passed.'
