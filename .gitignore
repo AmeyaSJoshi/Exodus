@@ -13,3 +13,7 @@ node_modules/
 # Supabase local runtime artifacts
 supabase/.branches/
 supabase/.temp/
+dashboard/.next/
+dashboard/node_modules/
+dashboard/apitest.mjs
+dashboard/rtdiag.mjs

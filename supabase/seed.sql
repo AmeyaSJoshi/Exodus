@@ -20,10 +20,14 @@ create or replace function pg_temp.create_test_user(
 language plpgsql
 as $$
 begin
+    -- GoTrue scans these token columns into non-nullable Go strings, so NULL
+    -- produces "Database error querying schema" at login. They must be ''.
     insert into auth.users (
         instance_id, id, aud, role, email, encrypted_password,
         email_confirmed_at, raw_app_meta_data, raw_user_meta_data,
-        created_at, updated_at
+        created_at, updated_at,
+        confirmation_token, recovery_token,
+        email_change, email_change_token_new, email_change_token_current
     ) values (
         '00000000-0000-0000-0000-000000000000',
         p_id,
@@ -35,12 +39,16 @@ begin
         '{"provider":"email","providers":["email"]}'::jsonb,
         '{}'::jsonb,
         now(),
-        now()
+        now(),
+        '', '', '', '', ''
     )
     on conflict (id) do update
         set email = excluded.email,
             encrypted_password = excluded.encrypted_password,
-            email_confirmed_at = excluded.email_confirmed_at;
+            email_confirmed_at = excluded.email_confirmed_at,
+            confirmation_token = '', recovery_token = '',
+            email_change = '', email_change_token_new = '',
+            email_change_token_current = '';
 
     -- GoTrue requires a matching identity row for password sign-in.
     insert into auth.identities (
