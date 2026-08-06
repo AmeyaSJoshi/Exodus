@@ -14,7 +14,7 @@ tests; every item requires a physical non-LiDAR iPhone in a real mapped space.
 - [ ] Accessibility toggles change the computed route summary
 - [ ] Existing AR navigation still runs end to end
 
-## Milestone 2 (not yet built)
+## Milestone 2 (available now)
 
 - [ ] Map and save a hallway
 - [ ] Terminate and reopen the app
@@ -27,19 +27,23 @@ tests; every item requires a physical non-LiDAR iPhone in a real mapped space.
 - [ ] Reject an estimate when too far from the recorded route
 - [ ] Manual fallback (choose room / tap map) is always reachable
 
-## Milestone 3 (not yet built)
+## Milestone 3 (available now)
 
 - [ ] Automatically choose an exit
 - [ ] Enable avoid-stairs mode
 - [ ] Confirm the route changes
 - [ ] Alternative exits are listed
 
-## Milestone 4 (not yet built)
+## Milestone 4 (available now)
 
 - [ ] Block the route ahead
 - [ ] Verify AR arrows change
 - [ ] Verify **old** AR arrows are fully removed before the new ones appear
 - [ ] Clear the hazard and confirm the original route returns
+- [ ] Report "Smoke ahead" and confirm the route avoids it without hard-blocking
+- [ ] Use "Select a Different Segment" and confirm the right segment is blocked
+- [ ] Block every path and confirm an honest failure, not a wrong route
+- [ ] Configure -> Active Hazards lists the report and clears it
 
 ## Milestone 5 (not yet built)
 

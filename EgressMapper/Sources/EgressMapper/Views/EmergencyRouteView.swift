@@ -68,7 +68,8 @@ struct EmergencyRouteView: View {
                     route: route.nodes,
                     path: path,
                     allWaypoints: waypoints,
-                    rerouteContext: graph.map { .init(graph: $0, start: start) }
+                    routeEdges: route.edges,
+                    rerouteContext: .init(start: start)
                 ) {
                     navigating = false
                 }

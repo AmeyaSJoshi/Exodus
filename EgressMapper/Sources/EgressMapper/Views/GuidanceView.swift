@@ -10,13 +10,15 @@ struct GuidanceView: View {
     let route: [RouteNode]
     let path: RoutePath
     let allWaypoints: [Waypoint]
+    /// Segments of `route`, so a reported hazard can name the right one.
+    var routeEdges: [RouteEdge] = []
     /// Supplied by Emergency mode so accessibility changes can reroute live.
     var rerouteContext: RerouteContext?
     var onExit: () -> Void
 
     /// Everything needed to recompute a route without leaving navigation.
+    /// The graph is re-read on each reroute so newly reported hazards apply.
     struct RerouteContext {
-        var graph: BuildingGraph
         var start: RoutePosition
     }
 
@@ -34,6 +36,8 @@ struct GuidanceView: View {
     @State private var profile = NavigationProfile.standard
     @State private var showAccessibility = false
     @State private var rerouteNotice: String?
+    @State private var activeEdges: [RouteEdge] = []
+    @State private var showHazardReport = false
     @AppStorage("voiceGuidanceEnabled") private var voiceEnabled = true
 
     init(
@@ -41,6 +45,7 @@ struct GuidanceView: View {
         route: [RouteNode],
         path: RoutePath,
         allWaypoints: [Waypoint],
+        routeEdges: [RouteEdge] = [],
         rerouteContext: RerouteContext? = nil,
         onExit: @escaping () -> Void
     ) {
@@ -48,10 +53,12 @@ struct GuidanceView: View {
         self.route = route
         self.path = path
         self.allWaypoints = allWaypoints
+        self.routeEdges = routeEdges
         self.rerouteContext = rerouteContext
         self.onExit = onExit
         _engine = State(initialValue: GuidanceEngine(route: route))
         _activeRoute = State(initialValue: route)
+        _activeEdges = State(initialValue: routeEdges)
     }
 
     private var relocalized: Bool { manager.didRelocalize }
@@ -93,6 +100,20 @@ struct GuidanceView: View {
         .onChange(of: manager.heightMode) { _, _ in redrawRoute() }
         .onChange(of: manager.heightOffset) { _, _ in redrawRoute() }
         .onChange(of: manager.estimatedFloorY) { _, _ in redrawRoute() }
+        .sheet(isPresented: $showHazardReport) {
+            if let graph = repository.routableGraph(for: zone) {
+                HazardReportView(
+                    zone: zone,
+                    graph: graph,
+                    routeEdges: activeEdges,
+                    currentLegIndex: engine.legIndex,
+                    locationDescription: update?.nextNode.map { "Heading to \($0.name)" } ?? zone.displayTitle,
+                    nextNodeName: update?.nextNode?.name
+                ) { hazard, edgeID in
+                    applyHazard(hazard, to: edgeID)
+                }
+            }
+        }
         .sheet(isPresented: $showAccessibility) {
             AccessibilitySheet(profile: $profile)
                 .presentationDetents([.height(330)])
@@ -105,17 +126,22 @@ struct GuidanceView: View {
 
     /// Recomputes the best exit under a changed profile and swaps the AR
     /// geometry. Old anchors are removed before new ones are added.
-    private func reroute(for profile: NavigationProfile) {
+    private func reroute(for profile: NavigationProfile, reason: String? = nil) {
         guard let context = rerouteContext else { return }
+        guard let graph = repository.routableGraph(for: zone) else {
+            errorMessage = RoutingError.emptyGraph.localizedDescription
+            return
+        }
         do {
             let options = try ShortestPathService.findBestEgressRoute(
-                from: context.start, graph: context.graph, profile: profile
+                from: context.start, graph: graph, profile: profile
             )
             activeRoute = options.best.nodes
+            activeEdges = options.best.edges
             engine = GuidanceEngine(route: options.best.nodes)
             lastTurnCueLeg = -1
             redrawRoute()
-            rerouteNotice = "Your route has changed. \(options.best.destination.name) — \(Int(options.best.totalDistanceMeters.rounded())) m."
+            rerouteNotice = (reason.map { "\($0) " } ?? "") + "Rerouting to \(options.best.destination.name) — \(Int(options.best.totalDistanceMeters.rounded())) m."
             announcer.say("Your route has changed. Proceed to \(options.best.destination.name).", force: true)
             announcer.turnCue()
             DiagnosticsLog.shared.log("Rerouted: \(options.summary)")
@@ -127,16 +153,38 @@ struct GuidanceView: View {
         }
     }
 
+    /// Persists the hazard next to (not inside) the permanent graph, then
+    /// recomputes the best exit and swaps the AR geometry.
+    private func applyHazard(_ hazard: RouteHazard, to edgeID: UUID) {
+        var active = repository.store.loadHazards(zone.id)
+        active.set(hazard, on: edgeID)
+        try? repository.store.saveHazards(active, zoneID: zone.id)
+        DiagnosticsLog.shared.log("Hazard \(hazard.type.rawValue) on edge \(edgeID)")
+        announcer.arrivalCue()
+        reroute(for: profile, reason: "\(hazard.type.displayName).")
+    }
+
     private func redrawRoute() {
         guard didRenderRoute || relocalized else { return }
+
+        // Tear the old route down completely before drawing the new one —
+        // a stale arrow left pointing at a blocked corridor is dangerous.
         for anchor in routeAnchors { manager.arView.scene.removeAnchor(anchor) }
-        routeAnchors = ARRouteRenderer.renderRoute(
+        routeAnchors.removeAll()
+
+        let placed = ARRouteRenderer.renderRoute(
             activeRoute,
             in: manager.arView,
             groundY: manager.estimatedFloorY,
             mode: manager.heightMode,
             offset: manager.heightOffset
         )
+        // Newly created anchors default to visible; respect the current
+        // tracking state so a reroute cannot reveal arrows we do not trust.
+        let reliable = manager.status.isReliable
+        for anchor in placed { anchor.isEnabled = reliable }
+        routeAnchors = placed
+        DiagnosticsLog.shared.log("Rendered \(placed.count) route anchors (visible=\(reliable))")
     }
 
     // MARK: - Relocalization
@@ -259,6 +307,19 @@ struct GuidanceView: View {
             }
 
             Spacer()
+
+            if rerouteContext != nil {
+                Button {
+                    showHazardReport = true
+                } label: {
+                    Label("Report a Problem", systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+            }
 
             Button {
                 showAccessibility = true
