@@ -1,7 +1,7 @@
 # EGRESS — Emergency Navigation Implementation Plan
 
 Date: 2026-08-05
-Status: Milestone 1 in progress
+Status: Milestones 1-5 implemented; all AR behaviour awaiting device verification
 
 ## Baseline (recorded before any changes)
 
@@ -80,3 +80,37 @@ guidance polish; tracking-loss recovery.
 ## Out of scope this milestone
 
 LiDAR, RoomPlan, backend, web dashboard, external AI APIs, multi-floor navigation.
+
+
+## Completion status (2026-08-06)
+
+All five milestones are implemented. 171 unit tests pass; simulator and signed
+device builds are clean.
+
+| Milestone | State |
+|---|---|
+| M1 modes + route graph + migration | Implemented, tested |
+| M2 "I Don't Know Where I Am" | Implemented, tested (AR unverified) |
+| M3 automatic exit + accessibility | Implemented, tested |
+| M4 hazard reporting + rerouting | Implemented, tested (AR unverified) |
+| M5 OCR, voice, guidance, recovery | Implemented, tested (AR/speech unverified) |
+
+### Not verified by any automated test
+
+Every ARKit, camera, microphone and haptic behaviour. The Simulator provides
+none of these. Specifically unproven: relocalization success, location accuracy,
+arrow alignment, teardown of stale arrows on reroute, speech recognition, and
+haptic patterns. See `docs/testing/emergency-navigation-device-tests.md`.
+
+### Known limitations
+
+- Graph edges derive from walk order, so a single recorded pass yields a single
+  path. Branching requires multiple mapping passes.
+- Corridor aliasing is undetected: relocalization can match the wrong stretch of
+  a repetitive hallway and would then be confidently wrong. Manual fallback and
+  sign scanning are always reachable for this reason.
+- Hazards are device-local and persist until cleared; no expiry, no sharing.
+- "Relocalize" is offered via the tracking-lost dialog rather than as a
+  permanently visible control.
+- Multi-floor navigation, backend, and voice-driven segment targeting beyond the
+  segment ahead remain out of scope.

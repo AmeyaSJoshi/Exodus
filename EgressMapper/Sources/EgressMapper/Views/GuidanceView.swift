@@ -400,7 +400,18 @@ struct GuidanceView: View {
             DebugOverlayView(
                 manager: manager,
                 routeNode: update?.nextNode?.name,
-                distanceToNext: update?.distanceToNext
+                distanceToNext: update?.distanceToNext,
+                estimate: rerouteContext.map {
+                    LocationEstimate(
+                        routePosition: $0.start,
+                        nearestNodeName: activeRoute.first?.name,
+                        distanceFromRouteMeters: 0,
+                        confidence: .high
+                    )
+                },
+                destinationExit: activeRoute.last?.name,
+                activeHazardCount: repository.store.loadHazards(zone.id).hazards.count,
+                profile: profile
             )
 
             TopDownRouteView(
