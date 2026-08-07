@@ -185,6 +185,12 @@ struct MapPackageDownloader {
             // Verify before anything touches the live cache directory.
             try MapPackageValidator.verify(manifest: manifest, files: files)
             try cache.store(manifest: manifest, files: files)
+            let worldMapBytes = manifest.artifacts
+                .first { $0.kind == .worldmap }
+                .map { files[$0.storagePath]?.count ?? 0 } ?? 0
+            DiagnosticsLog.shared.log(
+                "Download: stored v\(manifest.version), worldMap=\(worldMapBytes) bytes, \(needed.count) artifact(s)"
+            )
 
             return Outcome(
                 version: manifest.version,

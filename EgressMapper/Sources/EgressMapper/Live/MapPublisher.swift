@@ -203,6 +203,7 @@ struct MapPublisher {
         var pending: [PendingArtifact] = []
 
         if let worldMap = store.worldMapData(zone.id) {
+            DiagnosticsLog.shared.log("Publish: including world map, \(worldMap.count) bytes")
             pending.append(PendingArtifact(
                 kind: .worldmap,
                 zoneID: zone.id,
@@ -211,6 +212,11 @@ struct MapPublisher {
             ))
         }
 
+        if store.worldMapData(zone.id) == nil {
+            DiagnosticsLog.shared.log(
+                "Publish: no world map on disk for zone \(zone.id.uuidString.prefix(8)) — publishing routing data only"
+            )
+        }
         for view in store.referenceViews(zone.id) {
             guard let data = store.referenceViewData(view, zoneID: zone.id) else { continue }
             pending.append(PendingArtifact(

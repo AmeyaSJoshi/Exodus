@@ -307,6 +307,13 @@ struct PublicationStateView: View {
                             "AR world maps",
                             value: "\(cached.zones.filter(\.hasWorldMap).count)"
                         )
+                        if !cached.zones.contains(where: \.hasWorldMap) {
+                            Label(
+                                "AR localization unavailable — map contains routing data only. Routing and 2D guidance still work.",
+                                systemImage: "arkit"
+                            )
+                            .font(.caption2).foregroundStyle(.orange)
+                        }
                         LabeledContent(
                             "Reference views",
                             value: "\(cached.artifacts.filter { $0.kind == .referenceImage }.count)"
