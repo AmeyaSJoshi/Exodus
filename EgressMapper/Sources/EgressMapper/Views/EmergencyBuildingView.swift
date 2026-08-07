@@ -5,6 +5,7 @@ import SwiftUI
 /// Diagnostics is not required for any of it.
 struct EmergencyBuildingListView: View {
     @Environment(ZoneRepository.self) private var repository
+    @Environment(StartupCoordinator.self) private var startup
     @Bindable var session: BackendSession
 
     /// Derived, not stored: signing in changes the catalogue, and a stored
@@ -33,7 +34,7 @@ struct EmergencyBuildingListView: View {
                 Section {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(.red)
-                    Button("Retry") { Task { await reload() } }.font(.caption)
+                    Button("Retry") { startup.retry(session: session) }.font(.caption)
                 }
             }
 
@@ -72,16 +73,16 @@ struct EmergencyBuildingListView: View {
         .navigationDestination(item: $selectedZone) { zone in
             RouteSetupView(zone: zone)
         }
-        .task { await reload() }
+        .task { startup.start(repository: repository, session: session) }
         .refreshable { await reload() }
         .onChange(of: session.isSignedIn) { _, signedIn in
-            if signedIn { Task { await reload() } }
+            if signedIn { startup.authenticationChanged(session: session) }
         }
     }
 
     private func reload() async {
-        await repository.refresh()
-        await session.refresh()
+        startup.loadLocal(repository: repository, session: session)
+        startup.refreshRemote(session: session, force: true)
     }
 }
 
@@ -136,6 +137,13 @@ struct EvacuationView: View {
     @State private var packageGraph: BuildingGraph?
     @State private var showLocalization = false
     @State private var locatedBy: BuildingLocalizationService.Method?
+    /// The confirmed localization result, once the occupant accepts it.
+    @State private var localized: BuildingLocalizationService.Result?
+    /// The exit the occupant picked instead of the automatic choice.
+    @State private var preferredExitID: UUID?
+    /// True once guidance is actually on screen.
+    @State private var navigating = false
+    @State private var routeError: String?
 
     private var service: SupabaseBuildingService { session.service }
 
@@ -161,7 +169,10 @@ struct EvacuationView: View {
             if loading {
                 Section { HStack { ProgressView(); Text("Loading map…") } }
             } else if effectiveGraph != nil {
-                if !started { locationSection } else { routeSection; mapSection }
+                locationSection
+                // The route preview appears as soon as a start point exists,
+                // so there is always a visible next action.
+                if startNodeID != nil { readySection; mapSection }
             }
         }
         .navigationTitle(building.name)
@@ -176,14 +187,18 @@ struct EvacuationView: View {
                     cache: session.packages,
                     onLocated: { result in
                         showLocalization = false
-                        startNodeID = result.routePosition.nodeID ?? startNodeID
-                        locatedBy = result.method
-                        start()
+                        confirmLocalization(result)
                     },
                     onCancel: { showLocalization = false }
                 )
             }
         }
+        .fullScreenCover(isPresented: $navigating) {
+            guidanceDestination
+        }
+        .onChange(of: startNodeID) { _, _ in recompute(announce: false) }
+        .onChange(of: profile) { _, _ in recompute(announce: false) }
+        .onChange(of: preferredExitID) { _, _ in recompute(announce: false) }
     }
 
     private var statusSection: some View {
@@ -241,14 +256,13 @@ struct EvacuationView: View {
             Toggle("Avoid stairs", isOn: $profile.avoidStairs)
             Toggle("Wheelchair accessible only", isOn: $profile.requireWheelchairAccessible)
 
-            Button {
-                locatedBy = .manualSelection
-                start()
-            } label: {
-                Label("Start Evacuation", systemImage: "figure.run")
-                    .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 6)
+            if let localized {
+                LabeledContent("Detected", value: BuildingLocalizationService.describe(localized, manifest: package ?? placeholderManifest))
+                    .font(.caption)
+                LabeledContent("Confidence", value: localized.confidence.displayName)
+                    .font(.caption)
+                    .foregroundStyle(localized.canStartAutomatically ? Color.secondary : Color.orange)
             }
-            .disabled(startNodeID == nil)
         } header: {
             Text("Where are you?")
         } footer: {
@@ -262,8 +276,10 @@ struct EvacuationView: View {
         }
     }
 
+    /// Everything between "we know where you are" and "guidance is running".
+    /// There is always exactly one obvious next action here.
     @ViewBuilder
-    private var routeSection: some View {
+    private var readySection: some View {
         Section {
             if let banner {
                 Label(banner, systemImage: "arrow.triangle.branch")
@@ -283,13 +299,126 @@ struct EvacuationView: View {
                 if let locatedBy {
                     Text(locatedBy.displayName).font(.caption2).foregroundStyle(.secondary)
                 }
+                Button {
+                    start()
+                } label: {
+                    Label("Start Evacuation", systemImage: "figure.run")
+                        .font(.title3.weight(.bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .disabled(!canStart)
+
+                if let alternatives = options?.alternatives, !alternatives.isEmpty {
+                    Menu("Choose another safe exit") {
+                        ForEach(alternatives, id: \.destination.id) { route in
+                            Button("\(route.destination.name) — \(Int(route.totalDistanceMeters.rounded())) m") {
+                                preferredExitID = route.destination.id
+                            }
+                        }
+                        if preferredExitID != nil {
+                            Button("Use the safest exit") { preferredExitID = nil }
+                        }
+                    }
+                    .font(.caption)
+                }
             } else {
-                Text(loadError ?? "No route available.").foregroundStyle(.orange)
+                // Never leave a located occupant with no next action: say what
+                // went wrong and what they can do instead.
+                Label(routeError ?? loadError ?? "No route could be calculated from here.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+                Button("Select Room Manually") { localized = nil; startNodeID = nil }
+                    .font(.caption)
             }
-            Button("Change location") { started = false }
-                .font(.caption)
         } header: {
-            Text("Evacuation route")
+            Text("Your route out")
+        }
+    }
+
+    /// Every precondition the evacuation genuinely needs. Only this button is
+    /// gated — nothing else on the screen is disabled while it is not met.
+    private var canStart: Bool {
+        effectiveGraph != nil
+            && startNodeID != nil
+            && options?.best != nil
+            && service.overlay != nil
+    }
+
+    /// Stands in when a building has no downloaded package, purely so the
+    /// location description has something to name.
+    private var placeholderManifest: MapPackageManifest {
+        MapPackageManifest(
+            schemaVersion: MapPackageManifest.currentSchemaVersion,
+            buildingID: building.id, buildingName: building.name,
+            mapVersionID: building.activeMapVersionID ?? building.id,
+            version: building.version ?? 0, defaultFloorID: "default",
+            createdAt: Date(), zones: [], nodes: [], edges: [], artifacts: []
+        )
+    }
+
+    /// AR guidance when this building has a real world map on the device and
+    /// the phone supports it; the 2D route otherwise. One routing service
+    /// feeds both.
+    @ViewBuilder
+    private var guidanceDestination: some View {
+        if let graph = effectiveGraph, let best = options?.best, let startNodeID {
+            let zone = MappingZone(
+                id: package?.zones.first?.id ?? building.id,
+                campus: building.address ?? "",
+                building: building.name,
+                floor: package?.defaultFloorID ?? "default",
+                zoneName: building.name
+            )
+            if canLocalizeWithCamera && ARSessionManager.isSupported {
+                GuidanceView(
+                    zone: zone,
+                    route: best.nodes,
+                    path: Self.syntheticPath(best.nodes),
+                    allWaypoints: Self.waypoints(from: graph, zoneID: zone.id),
+                    routeEdges: best.edges,
+                    rerouteContext: .init(
+                        start: RoutePosition(
+                            nodeID: startNodeID,
+                            worldPosition: graph.node(startNodeID)?.worldPosition ?? .zero
+                        )
+                    ),
+                    liveService: service
+                ) { navigating = false }
+            } else {
+                TwoDGuidanceView(
+                    buildingName: building.name,
+                    graph: graph,
+                    route: best,
+                    startNodeID: startNodeID,
+                    banner: banner,
+                    connection: service.connection
+                ) { navigating = false }
+            }
+        }
+    }
+
+    /// The package carries node positions but no recorded walk, so the route
+    /// itself stands in for the path the top-down map draws.
+    static func syntheticPath(_ nodes: [RouteNode]) -> RoutePath {
+        var path = RoutePath()
+        for (index, node) in nodes.enumerated() {
+            path.append(node.worldPosition, at: TimeInterval(index))
+        }
+        return path
+    }
+
+    static func waypoints(from graph: BuildingGraph, zoneID: UUID) -> [Waypoint] {
+        graph.nodes.compactMap { node in
+            // hallwayPoint and temporaryStart have no waypoint equivalent and
+            // are not things the user navigates *to*.
+            guard let type = WaypointType(rawValue: node.type.rawValue) else { return nil }
+            return Waypoint(
+                id: node.id, zoneID: zoneID, name: node.name, type: type,
+                anchorID: node.id, transform: node.position, pathIndex: 0
+            )
         }
     }
 
@@ -346,9 +475,42 @@ struct EvacuationView: View {
         }
     }
 
-    private func start() {
-        started = true
+    /// Commits a localization result to the evacuation: snap to the graph,
+    /// pick an exit, and put a live route on screen. Nothing here starts
+    /// guidance — the occupant still presses Start Evacuation.
+    private func confirmLocalization(_ result: BuildingLocalizationService.Result) {
+        localized = result
+        locatedBy = result.method
+        routeError = nil
+
+        // The localization search runs against the same graph this view routes
+        // on, so a snapped node is expected to resolve. If it does not, say so
+        // rather than silently falling back to a stale selection.
+        if let nodeID = result.routePosition.nodeID, effectiveGraph?.node(nodeID) != nil {
+            startNodeID = nodeID
+        } else if let edgeID = result.routePosition.edgeID, effectiveGraph?.edge(edgeID) != nil {
+            // Mid-hallway: route from the nearest end of that segment.
+            startNodeID = effectiveGraph?.edge(edgeID)?.fromNodeID
+        } else {
+            routeError = "Your location was recognised but is not on this building's route graph. Choose the nearest room instead."
+            startNodeID = nil
+            return
+        }
         recompute(announce: false)
+        DiagnosticsLog.shared.log(
+            "Localized via \(result.method.rawValue), start=\(startNodeID?.uuidString.prefix(8) ?? "-"), exit=\(options?.best.destination.name ?? "none")"
+        )
+    }
+
+    /// Opens guidance. Every precondition was already checked by `canStart`.
+    private func start() {
+        guard canStart else { return }
+        started = true
+        navigating = true
+        announcer.say(
+            "Evacuating to \(options?.best.destination.name ?? "the nearest exit").", force: true
+        )
+        DiagnosticsLog.shared.log("Evacuation started -> \(options?.best.destination.name ?? "?")")
     }
 
     private func recompute(announce: Bool, changedName: String? = nil) {
@@ -356,11 +518,22 @@ struct EvacuationView: View {
               let node = graph.node(startNodeID) else { options = nil; return }
         let previous = options?.best.destination.id
         do {
-            let result = try ShortestPathService.findBestEgressRoute(
+            var result = try ShortestPathService.findBestEgressRoute(
                 from: RoutePosition(nodeID: node.id, worldPosition: node.worldPosition),
                 graph: graph, profile: profile
             )
+            // Honour an explicitly chosen exit, but only while it is still
+            // reachable — a live closure must be able to override the choice.
+            if let preferredExitID,
+               let chosen = ([result.best] + result.alternatives)
+                   .first(where: { $0.destination.id == preferredExitID }) {
+                let rest = ([result.best] + result.alternatives).filter { $0.destination.id != preferredExitID }
+                result = ShortestPathService.EgressOptions(
+                    best: chosen, alternatives: rest, unreachable: result.unreachable
+                )
+            }
             options = result
+            routeError = nil
             loadError = nil
             if announce, previous != result.best.destination.id {
                 let message = LiveStateOverlay.changeMessage(
@@ -376,7 +549,7 @@ struct EvacuationView: View {
             }
         } catch {
             options = nil
-            loadError = error.localizedDescription
+            routeError = error.localizedDescription
             if announce { announcer.say(error.localizedDescription, force: true) }
         }
     }

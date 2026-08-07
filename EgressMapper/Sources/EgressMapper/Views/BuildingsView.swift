@@ -41,8 +41,14 @@ final class BackendSession {
         }
     }
 
-    func refresh() async {
+    /// Reads only the cached version numbers — a directory listing per
+    /// building, no manifests, no checksums, no artifacts.
+    func refreshCachedVersions() {
         cachedVersions = packages.allCachedVersions()
+    }
+
+    func refresh() async {
+        refreshCachedVersions()
         guard isSignedIn else { return }
         do {
             try await service.loadProfile()

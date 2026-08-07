@@ -336,9 +336,27 @@ struct ZoneFileStore {
     }
 
     func listZones() -> [MappingZone] {
-        zoneDirectories().keys
-            .compactMap { loadZone($0) }
-            .sorted { $0.updatedAt > $1.updatedAt }
+        scanZones().zones
+    }
+
+    /// Enumerates and decodes every zone exactly once, reporting both the
+    /// usable zones and the damaged folders. Callers that need both must use
+    /// this rather than calling `listZones` and `damagedZoneIDs` separately —
+    /// that decoded every `zone.json` twice on every launch.
+    ///
+    /// Reads only `zone.json`. World maps, reference images and checksums are
+    /// deliberately untouched: listing saved maps must not depend on the size
+    /// of what was recorded.
+    func scanZones() -> (zones: [MappingZone], damaged: [UUID]) {
+        var zones: [MappingZone] = []
+        var damaged: [UUID] = []
+        for (id, _) in zoneDirectories() {
+            if let zone = loadZone(id) { zones.append(zone) } else { damaged.append(id) }
+        }
+        return (
+            zones.sorted { $0.updatedAt > $1.updatedAt },
+            damaged.sorted { $0.uuidString < $1.uuidString }
+        )
     }
 
     /// Zone directories that exist but whose metadata will not decode.
@@ -347,10 +365,7 @@ struct ZoneFileStore {
     /// saved: it simply drops out of the list. Callers surface it so the user
     /// sees "this map is damaged" rather than an unexplained empty screen.
     func damagedZoneIDs() -> [UUID] {
-        zoneDirectories()
-            .filter { loadZone($0.key) == nil }
-            .keys
-            .sorted { $0.uuidString < $1.uuidString }
+        scanZones().damaged
     }
 
     func deleteZone(_ id: UUID) throws {

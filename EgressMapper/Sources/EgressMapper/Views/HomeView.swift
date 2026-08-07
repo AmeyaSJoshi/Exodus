@@ -1,23 +1,28 @@
 import SwiftUI
-import ARKit
 
 /// Top level of the app: a prominent Emergency path for someone who needs to
 /// get out, and a Configure path for the administrator tooling.
 struct HomeView: View {
     @Environment(ZoneRepository.self) private var repository
     @Environment(BackendSession.self) private var session
+    @Environment(StartupCoordinator.self) private var startup
+    @Environment(DeviceCapabilities.self) private var capabilities
     @State private var showEmergency = false
     @State private var showConfigure = false
     @State private var showSavedZones = false
 
-    private var arSupported: Bool { ARWorldTrackingConfiguration.isSupported }
+    /// Read from the resolved capability, never probed here. Calling
+    /// `ARWorldTrackingConfiguration.isSupported` from `body` loaded ARKit on
+    /// the main thread before the first frame, on every re-render.
+    private var arSupported: Bool { capabilities.arWorldTrackingSupported }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
-                    if !arSupported { unsupportedBanner }
+                    if capabilities.resolved && !arSupported { unsupportedBanner }
+                    if let status = startup.phase.label { statusStrip(status) }
                     emergencyButton
                     secondaryActions
                     disclaimer
@@ -35,7 +40,9 @@ struct HomeView: View {
             .navigationDestination(isPresented: $showSavedZones) {
                 SavedMapsView(session: session)
             }
-            .task { await repository.refresh() }
+            // The coordinator owns this; every screen calling its own refresh
+            // is what produced overlapping scans and catalogue requests.
+            .task { startup.start(repository: repository, session: session) }
         }
     }
 
@@ -111,6 +118,26 @@ struct HomeView: View {
             .tint(.white)
         }
         .padding(.top, 14)
+    }
+
+    /// Non-blocking: it reports what is happening in the background and never
+    /// covers or disables anything.
+    private func statusStrip(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            if startup.phase.canRetry {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            } else {
+                ProgressView().controlSize(.mini)
+            }
+            Text(text).font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            if startup.phase.canRetry {
+                Button("Retry") { startup.retry(session: session) }.font(.caption)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Color.white.opacity(0.06), in: Capsule())
+        .allowsHitTesting(startup.phase.canRetry)
     }
 
     private var disclaimer: some View {
