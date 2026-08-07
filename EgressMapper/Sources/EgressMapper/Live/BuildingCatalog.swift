@@ -108,7 +108,7 @@ struct BuildingEntry: Identifiable, Hashable {
 
         if mayManage {
             if localZone != nil {
-                available += [.openDraft, .edit, .testRoute]
+                available += [.openDraft, .edit, .testRoute, .deleteLocalMap]
                 // Attaching to a building is a server write, so it needs a
                 // real administrator account, not merely a signed-out device.
                 if profile.canManageBuildings {
@@ -116,7 +116,7 @@ struct BuildingEntry: Identifiable, Hashable {
                 }
             }
             if remote != nil, profile.canManageBuildings {
-                available.append(.viewPublicationState)
+                available += [.viewPublicationState, .deleteBuilding]
             }
         }
 
@@ -157,6 +157,11 @@ enum BuildingAction: String, Hashable, CaseIterable {
     case testRoute
     case publishUpdate
     case viewPublicationState
+    /// Deletes the recording held on this device. Anything published stays.
+    case deleteLocalMap
+    /// Deletes the building and every version of its map for the whole
+    /// organization. Administrators only.
+    case deleteBuilding
     // Everyone
     case viewBuilding
     case download
@@ -168,7 +173,8 @@ enum BuildingAction: String, Hashable, CaseIterable {
     /// administrator ever sees these, and RLS rejects them for anyone else.
     var requiresManageRole: Bool {
         switch self {
-        case .openDraft, .edit, .attachToBuilding, .testRoute, .publishUpdate, .viewPublicationState:
+        case .openDraft, .edit, .attachToBuilding, .testRoute, .publishUpdate,
+             .viewPublicationState, .deleteLocalMap, .deleteBuilding:
             return true
         case .viewBuilding, .download, .update, .useInEmergency, .removeDownload:
             return false
@@ -183,6 +189,8 @@ enum BuildingAction: String, Hashable, CaseIterable {
         case .testRoute: return "Test Route"
         case .publishUpdate: return "Publish Update"
         case .viewPublicationState: return "Publication State"
+        case .deleteLocalMap: return "Delete From Device"
+        case .deleteBuilding: return "Delete Building"
         case .viewBuilding: return "View Building"
         case .download: return "Download"
         case .update: return "Update"
@@ -199,6 +207,8 @@ enum BuildingAction: String, Hashable, CaseIterable {
         case .testRoute: return "figure.walk"
         case .publishUpdate: return "arrow.up.circle"
         case .viewPublicationState: return "info.circle"
+        case .deleteLocalMap: return "trash"
+        case .deleteBuilding: return "trash.fill"
         case .viewBuilding: return "building.2"
         case .download: return "arrow.down.circle"
         case .update: return "arrow.triangle.2.circlepath"
@@ -210,6 +220,7 @@ enum BuildingAction: String, Hashable, CaseIterable {
     static let displayOrder: [BuildingAction] = [
         .useInEmergency, .download, .update, .openDraft, .edit, .testRoute,
         .attachToBuilding, .publishUpdate, .viewBuilding, .viewPublicationState, .removeDownload,
+        .deleteLocalMap, .deleteBuilding,
     ]
 }
 

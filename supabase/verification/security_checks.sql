@@ -627,4 +627,70 @@ begin
 end $$;
 reset role;
 
+-- MARK: Deleting a building --------------------------------------------------
+
+do $$
+declare
+    bldg    uuid := '33333333-3333-3333-3333-333333333333';
+    blocked boolean := false;
+    n integer;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+    begin
+        perform public.delete_building(bldg);
+    exception when others then blocked := true;
+    end;
+    perform pg_temp.assert(blocked, 'occupant cannot delete a building');
+
+    blocked := false;
+    begin
+        delete from public.buildings where id = bldg;
+    exception when others then blocked := true;
+    end;
+    select count(*) into n from public.buildings where id = bldg;
+    perform pg_temp.assert(blocked or n = 1, 'occupant cannot delete the building row directly');
+end $$;
+reset role;
+
+do $$
+declare
+    bldg    uuid := '33333333-3333-3333-3333-333333333333';
+    blocked boolean := false;
+begin
+    perform pg_temp.act_as('outsider@egress.test');
+    begin
+        perform public.delete_building(bldg);
+    exception when others then blocked := true;
+    end;
+    perform pg_temp.assert(blocked, 'another organization cannot delete a building');
+end $$;
+reset role;
+
+-- Done last: this actually removes the seeded building, so nothing after it
+-- may depend on that row existing.
+do $$
+declare
+    bldg uuid := '33333333-3333-3333-3333-333333333333';
+    mapv uuid := '44444444-4444-4444-4444-444444444444';
+    n integer;
+begin
+    perform pg_temp.act_as('admin@egress.test');
+    perform public.delete_building(bldg);
+
+    select count(*) into n from public.buildings where id = bldg;
+    perform pg_temp.assert(n = 0, 'administrator can delete their own building');
+
+    -- Everything hanging off it must go with it, or the next published map
+    -- inherits orphaned nodes and stale closures.
+    select count(*) into n from public.map_versions where building_id = bldg;
+    perform pg_temp.assert(n = 0, 'deleting a building removes its map versions');
+    select count(*) into n from public.route_nodes where map_version_id = mapv;
+    perform pg_temp.assert(n = 0, 'deleting a building removes its route nodes');
+    select count(*) into n from public.map_artifacts where building_id = bldg;
+    perform pg_temp.assert(n = 0, 'deleting a building removes its map artifacts');
+    select count(*) into n from public.live_edge_states where building_id = bldg;
+    perform pg_temp.assert(n = 0, 'deleting a building removes its live state');
+end $$;
+reset role;
+
 \echo 'All security checks passed.'

@@ -113,6 +113,20 @@ final class BackendSession {
         }
     }
 
+    /// Deletes the building for the whole organization, and drops this
+    /// device's downloaded copy with it.
+    func deleteBuilding(_ building: CatalogBuilding) async {
+        do {
+            try await service.deleteBuilding(id: building.id)
+            packages.remove(buildingID: building.id)
+            cachedVersions = packages.allCachedVersions()
+            downloadStates[building.id] = nil
+            error = nil
+        } catch {
+            self.error = "Could not delete \(building.name): \(error.localizedDescription)"
+        }
+    }
+
     func removeDownload(buildingID: UUID) {
         packages.remove(buildingID: buildingID)
         cachedVersions = packages.allCachedVersions()
