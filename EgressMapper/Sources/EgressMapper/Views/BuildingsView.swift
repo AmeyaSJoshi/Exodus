@@ -13,6 +13,13 @@ final class BackendSession {
     var busy = false
     var error: String?
 
+    /// Downloaded map packages. One cache for the whole app, so Saved Maps,
+    /// Emergency and Diagnostics all agree on what is available offline.
+    let packages = MapPackageCache()
+    /// In-flight download state, which nothing stored on disk can imply.
+    private(set) var downloadStates: [UUID: BuildingAvailability] = [:]
+    private(set) var cachedVersions: [UUID: Int] = [:]
+
     var profile: UserProfile { service.profile }
     var isSignedIn: Bool { service.signedInEmail != nil }
     var canManage: Bool { profile.canManageBuildings }
@@ -35,6 +42,7 @@ final class BackendSession {
     }
 
     func refresh() async {
+        cachedVersions = packages.allCachedVersions()
         guard isSignedIn else { return }
         do {
             try await service.loadProfile()
@@ -49,14 +57,70 @@ final class BackendSession {
         await service.signOut()
     }
 
-    /// Unified Saved Maps rows: organization buildings merged with local zones.
+    /// Unified Saved Maps rows: organization buildings merged with local zones
+    /// and the download cache.
     func entries(localZones: [MappingZone]) -> [BuildingEntry] {
         BuildingCatalogMerger.merge(
             remote: service.catalog,
             localZones: localZones,
-            cachedVersion: { service.cachedVersions[$0] },
-            profile: service.profile
+            cachedVersion: { [cachedVersions] in cachedVersions[$0] },
+            profile: service.profile,
+            transient: downloadStates
         )
+    }
+
+    // MARK: - Map packages
+
+    /// The verified package on this device, or nil when nothing is cached.
+    /// Reading it never touches the network, so Emergency works offline.
+    func cachedPackage(for buildingID: UUID) -> MapPackageManifest? {
+        packages.manifest(buildingID: buildingID)
+    }
+
+    /// Downloads and verifies the published package. Metadata discovery is
+    /// automatic elsewhere; the large artifacts only come down when the user
+    /// asks for them here.
+    func download(building: CatalogBuilding) async {
+        guard let client = service.currentClient else {
+            downloadStates[building.id] = .downloadFailed("Not signed in")
+            return
+        }
+        guard let mapVersionID = building.activeMapVersionID else {
+            downloadStates[building.id] = .downloadFailed("No published map")
+            return
+        }
+
+        downloadStates[building.id] = .downloading
+        let downloader = MapPackageDownloader(
+            source: SupabaseMapPackageSource(client: client), cache: packages
+        )
+        do {
+            let outcome = try await downloader.download(
+                buildingID: building.id, mapVersionID: mapVersionID
+            )
+            service.markCached(buildingID: building.id, version: outcome.version)
+            cachedVersions = packages.allCachedVersions()
+            downloadStates[building.id] = nil
+            DiagnosticsLog.shared.log(
+                "Downloaded \(building.name) v\(outcome.version) — \(outcome.artifactCount) artifact(s)"
+            )
+        } catch {
+            // The previous package, if any, is still intact — the merge will
+            // go on reporting it as offline available.
+            cachedVersions = packages.allCachedVersions()
+            downloadStates[building.id] = .downloadFailed(error.localizedDescription)
+            DiagnosticsLog.shared.log("Download failed for \(building.name): \(error)")
+        }
+    }
+
+    func removeDownload(buildingID: UUID) {
+        packages.remove(buildingID: buildingID)
+        cachedVersions = packages.allCachedVersions()
+        downloadStates[buildingID] = nil
+    }
+
+    func clearDownloadState(_ buildingID: UUID) {
+        downloadStates[buildingID] = nil
     }
 }
 
@@ -230,6 +294,8 @@ struct AddBuildingView: View {
 struct AttachMapView: View {
     @Bindable var session: BackendSession
     let building: CatalogBuilding
+    /// Set when the mapper started from a specific local map in Saved Maps.
+    var preselected: MappingZone?
 
     @Environment(ZoneRepository.self) private var repository
     @Environment(\.dismiss) private var dismiss
@@ -237,6 +303,7 @@ struct AttachMapView: View {
     @State private var selected: MappingZone?
     @State private var busy = false
     @State private var error: String?
+    @State private var progress: String?
     @State private var result: MapPublisher.Result?
 
     var body: some View {
@@ -278,6 +345,35 @@ struct AttachMapView: View {
                 }
 
                 if let zone = selected, let graph = repository.graph(for: zone) {
+                    Section("Localization package") {
+                        let artifacts = MapPublisher.artifacts(for: zone, store: repository.store)
+                        let worldMaps = artifacts.filter { $0.kind == .worldmap }
+                        let views = artifacts.filter { $0.kind == .referenceImage }
+                        LabeledContent("AR world map", value: worldMaps.isEmpty ? "None" : "Included")
+                        LabeledContent("Reference views", value: "\(views.count)")
+                        LabeledContent(
+                            "Upload size",
+                            value: ByteCountFormatter.string(
+                                fromByteCount: Int64(artifacts.reduce(0) { $0 + $1.data.count }),
+                                countStyle: .file
+                            )
+                        )
+                        if worldMaps.isEmpty {
+                            Label(
+                                "No saved AR world map. The route will publish and work, but occupants cannot use camera relocalization in this building.",
+                                systemImage: "exclamationmark.triangle.fill"
+                            )
+                            .font(.caption2).foregroundStyle(.orange)
+                        }
+                        if views.count < 2 {
+                            Label(
+                                "Only \(views.count) reference view. Add photos from other directions so relocalization works from more than one spot.",
+                                systemImage: "camera.viewfinder"
+                            )
+                            .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+
                     Section("Validation") {
                         let dangling = MapPublisher.danglingEdgeCount(in: graph)
                         LabeledContent("Nodes", value: "\(graph.nodes.count)")
@@ -299,7 +395,7 @@ struct AttachMapView: View {
                         } label: {
                             HStack {
                                 if busy { ProgressView() }
-                                Text(building.version == nil ? "Publish" : "Publish Update")
+                                Text(progress ?? (building.version == nil ? "Publish" : "Publish Update"))
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -312,7 +408,9 @@ struct AttachMapView: View {
                         LabeledContent("Version", value: "\(result.version)")
                         LabeledContent("Nodes", value: "\(result.nodeCount)")
                         LabeledContent("Edges", value: "\(result.edgeCount)")
-                        Text("Occupants in your organization will see this building.")
+                        LabeledContent("Files uploaded", value: "\(result.artifactCount)")
+                        LabeledContent("AR world map", value: result.hasWorldMap ? "Included" : "None")
+                        Text("Occupants in your organization will see this building and can download it.")
                             .font(.caption).foregroundStyle(.green)
                     }
                 }
@@ -328,22 +426,28 @@ struct AttachMapView: View {
                     Button(result == nil ? "Cancel" : "Done") { dismiss() }
                 }
             }
-            .task { await repository.refresh() }
+            .task {
+                await repository.refresh()
+                if selected == nil { selected = preselected }
+            }
         }
     }
 
     private func publish(zone: MappingZone, graph: BuildingGraph) async {
-        busy = true; error = nil
-        defer { busy = false }
+        busy = true; error = nil; progress = "Uploading map package…"
+        defer { busy = false; progress = nil }
         do {
             guard let client = session.service.currentClient else {
                 throw BackendError.notConfigured
             }
+            let artifacts = MapPublisher.artifacts(for: zone, store: repository.store)
             let outcome = try await MapPublisher(client: client).publish(
                 zone: zone,
                 graph: graph,
                 organizationID: session.profile.organizationID ?? UUID(),
-                existingBuildingID: building.id
+                existingBuildingID: building.id,
+                buildingName: building.name,
+                artifacts: artifacts
             )
             result = outcome
 
@@ -353,6 +457,8 @@ struct AttachMapView: View {
             await repository.upsert(updated)
             try await session.service.loadCatalog()
         } catch {
+            // Nothing was published: the version stays a draft and the objects
+            // that did upload have been removed.
             self.error = error.localizedDescription
         }
     }

@@ -33,7 +33,7 @@ struct HomeView: View {
                 ConfigureView()
             }
             .navigationDestination(isPresented: $showSavedZones) {
-                SavedZonesView()
+                SavedMapsView(session: session)
             }
             .task { await repository.refresh() }
         }
@@ -185,7 +185,7 @@ struct ConfigureView: View {
             CreateZoneView().environment(repository)
         }
         .navigationDestination(isPresented: $showSavedZones) {
-            SavedZonesView()
+            SavedMapsView(session: session)
         }
         .task { profile = repository.store.loadProfile() }
         .onChange(of: profile) { _, updated in

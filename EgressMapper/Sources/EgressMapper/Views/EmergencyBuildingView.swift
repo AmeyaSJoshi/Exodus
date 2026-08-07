@@ -131,11 +131,22 @@ struct EvacuationView: View {
     @State private var loadError: String?
     @State private var loading = true
     @State private var announcer = Announcer()
+    /// The verified downloaded package for this building, when there is one.
+    @State private var package: MapPackageManifest?
+    @State private var packageGraph: BuildingGraph?
+    @State private var showLocalization = false
+    @State private var locatedBy: BuildingLocalizationService.Method?
 
     private var service: SupabaseBuildingService { session.service }
 
+    /// The permanent graph, preferring the downloaded package so the building
+    /// works with no network at all. The server copy is the fallback.
+    private var permanentGraph: BuildingGraph? {
+        packageGraph ?? service.graph
+    }
+
     private var effectiveGraph: BuildingGraph? {
-        guard let graph = service.graph else { return nil }
+        guard let graph = permanentGraph else { return nil }
         guard let overlay = service.overlay else { return graph }
         return overlay.effectiveGraph(from: graph)
     }
@@ -157,6 +168,22 @@ struct EvacuationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
         .onDisappear { Task { await service.stopSubscription() } }
+        .fullScreenCover(isPresented: $showLocalization) {
+            if let package, let graph = permanentGraph {
+                BuildingLocalizationView(
+                    manifest: package,
+                    graph: graph,
+                    cache: session.packages,
+                    onLocated: { result in
+                        showLocalization = false
+                        startNodeID = result.routePosition.nodeID ?? startNodeID
+                        locatedBy = result.method
+                        start()
+                    },
+                    onCancel: { showLocalization = false }
+                )
+            }
+        }
     }
 
     private var statusSection: some View {
@@ -173,14 +200,38 @@ struct EvacuationView: View {
                 Label("Using the cached map — live updates unavailable", systemImage: "wifi.slash")
                     .font(.caption).foregroundStyle(.orange)
             }
+            if let package {
+                Label(
+                    "Offline map v\(package.version) · \(package.zones.filter(\.hasWorldMap).count) AR zone(s)",
+                    systemImage: "arrow.down.circle.fill"
+                )
+                .font(.caption).foregroundStyle(.green)
+            }
             if let loadError {
                 Text(loadError).font(.caption).foregroundStyle(.red)
             }
         }
     }
 
+    /// Camera localization needs a downloaded package with at least one
+    /// ARWorldMap — never offered when it could not possibly work.
+    private var canLocalizeWithCamera: Bool {
+        guard let package else { return false }
+        return !BuildingLocalizationService.relocalizableZones(in: package).isEmpty
+    }
+
     private var locationSection: some View {
         Section {
+            if canLocalizeWithCamera {
+                Button {
+                    showLocalization = true
+                } label: {
+                    Label("I Don't Know Where I Am", systemImage: "location.magnifyingglass")
+                        .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 6)
+                }
+                .tint(.blue)
+            }
+
             Picker("I am at", selection: $startNodeID) {
                 Text("Select a room…").tag(UUID?.none)
                 ForEach(rooms) { node in
@@ -191,6 +242,7 @@ struct EvacuationView: View {
             Toggle("Wheelchair accessible only", isOn: $profile.requireWheelchairAccessible)
 
             Button {
+                locatedBy = .manualSelection
                 start()
             } label: {
                 Label("Start Evacuation", systemImage: "figure.run")
@@ -200,7 +252,13 @@ struct EvacuationView: View {
         } header: {
             Text("Where are you?")
         } footer: {
-            Text("Pick the nearest room. Camera localization is available from the AR flow once this building has a mapped zone on this device.")
+            if canLocalizeWithCamera {
+                Text("Point the camera around you to be found automatically, or pick the nearest room.")
+            } else if package == nil {
+                Text("Download this building from Saved Maps to enable camera localization. Picking a room works either way.")
+            } else {
+                Text("This building has no AR map recorded, so pick the nearest room.")
+            }
         }
     }
 
@@ -221,6 +279,9 @@ struct EvacuationView: View {
                 }
                 if let summary = options?.summary {
                     Text(summary).font(.caption2).foregroundStyle(.secondary)
+                }
+                if let locatedBy {
+                    Text(locatedBy.displayName).font(.caption2).foregroundStyle(.secondary)
                 }
             } else {
                 Text(loadError ?? "No route available.").foregroundStyle(.orange)
@@ -250,12 +311,23 @@ struct EvacuationView: View {
         loading = true
         defer { loading = false }
         profile = NavigationProfile.standard
+
+        // The downloaded package first: it is verified, it carries the AR world
+        // map, and it needs no network. Only if there is none do we depend on
+        // the server for the graph.
+        if let cached = session.cachedPackage(for: building.id) {
+            package = cached
+            packageGraph = MapPackageBuilder.graph(from: cached)
+        }
+
         let remote = RemoteBuilding(
             id: building.id, name: building.name,
             address: building.address, activeMapVersionID: building.activeMapVersionID
         )
         do {
-            try await service.loadGraph(for: remote)
+            if packageGraph == nil {
+                try await service.loadGraph(for: remote)
+            }
             // Live state is applied *before* any route is calculated.
             service.onStateChanged = { changed in
                 Task { @MainActor in handleLiveChange(changed) }
@@ -263,7 +335,14 @@ struct EvacuationView: View {
             try await service.subscribe(buildingID: building.id)
             startNodeID = rooms.first(where: { $0.type == .room })?.id ?? rooms.first?.id
         } catch {
-            loadError = error.localizedDescription
+            // A downloaded building still routes with no connection; say so
+            // rather than reporting it as unavailable.
+            if packageGraph != nil {
+                loadError = "Offline — using the downloaded map. Live closures are unavailable."
+                startNodeID = rooms.first(where: { $0.type == .room })?.id ?? rooms.first?.id
+            } else {
+                loadError = error.localizedDescription
+            }
         }
     }
 
@@ -303,7 +382,10 @@ struct EvacuationView: View {
     }
 
     private func handleLiveChange(_ changed: LiveEdgeState?) {
-        guard started, let permanent = service.graph else { return }
+        // Edge stable ids are preserved through publication, so a live closure
+        // names the same edge whether the graph came from the package or the
+        // server.
+        guard started, let permanent = permanentGraph else { return }
         var name: String?
         if let changed, let edge = permanent.edge(changed.edgeStableID) {
             let a = permanent.node(edge.fromNodeID)?.name ?? "A segment"

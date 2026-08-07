@@ -1,81 +1,110 @@
 import SwiftUI
-import Supabase
 
-/// Publishes a locally mapped zone to the backend so administrators can see it
-/// and mark parts of it blocked. Requires an administrator sign-in.
+/// Publishes a locally mapped zone from the map's own screen.
+///
+/// Uses the shared `BackendSession`, so there is one authentication path in the
+/// app and the organization comes from the signed-in profile — never typed in.
 struct PublishMapView: View {
     let zone: MappingZone
     let graph: BuildingGraph
     var onPublished: (UUID) -> Void
 
     @Environment(ZoneRepository.self) private var repository
+    @Environment(BackendSession.self) private var session
     @Environment(\.dismiss) private var dismiss
 
-    @State private var config = BackendConfig.load()
-    @State private var email = "admin@egress.test"
-    @State private var password = "egress-admin-pw"
-    @State private var organizationID = ""
-    @State private var signedIn = false
+    @State private var buildingName = ""
     @State private var busy = false
     @State private var error: String?
     @State private var result: MapPublisher.Result?
-    @State private var client: SupabaseClient?
 
     private var dangling: Int { MapPublisher.danglingEdgeCount(in: graph) }
+
+    private var artifacts: [PendingArtifact] {
+        MapPublisher.artifacts(for: zone, store: repository.store)
+    }
+
+    /// The building this zone was already published to, if any.
+    private var existing: CatalogBuilding? {
+        guard let id = zone.remoteBuildingID else { return nil }
+        return session.service.catalog.first { $0.id == id }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Zone") {
+                Section("Map") {
                     LabeledContent("Building", value: zone.building)
                     LabeledContent("Floor", value: zone.floor)
                     LabeledContent("Nodes", value: "\(graph.nodes.count)")
                     LabeledContent("Edges", value: "\(graph.edges.count)")
+                    LabeledContent("Exits", value: "\(graph.exits.count)")
                     if dangling > 0 {
                         Label("\(dangling) connection(s) reference a missing waypoint",
                               systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.orange)
-                    }
-                    if let existing = zone.remoteBuildingID {
-                        Text("Already published. Publishing again creates a new version and archives the old one.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Text(existing.uuidString).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                    } else if graph.exits.isEmpty {
+                        Label("No exit waypoints — evacuation routing needs at least one.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
                     }
                 }
 
-                if !signedIn {
-                    Section("Administrator sign-in") {
-                        TextField("Backend URL", text: $config.url)
-                            .autocorrectionDisabled().textInputAutocapitalization(.never)
-                        SecureField("Anon key", text: $config.anonKey)
-                        TextField("Email", text: $email)
-                            .autocorrectionDisabled().textInputAutocapitalization(.never)
-                        SecureField("Password", text: $password)
-                        Button("Sign in") { Task { await signIn() } }
-                            .disabled(busy || config.anonKey.isEmpty)
+                Section("Localization package") {
+                    LabeledContent(
+                        "AR world map",
+                        value: artifacts.contains { $0.kind == .worldmap } ? "Included" : "None"
+                    )
+                    LabeledContent(
+                        "Reference views",
+                        value: "\(artifacts.filter { $0.kind == .referenceImage }.count)"
+                    )
+                    LabeledContent(
+                        "Upload size",
+                        value: ByteCountFormatter.string(
+                            fromByteCount: Int64(artifacts.reduce(0) { $0 + $1.data.count }),
+                            countStyle: .file
+                        )
+                    )
+                }
+
+                if !session.isSignedIn {
+                    BackendSignInView(session: session, title: "Sign in to publish")
+                } else if !session.canManage {
+                    Section {
+                        Label(
+                            "Your account is an occupant. Only administrators and mappers can publish maps.",
+                            systemImage: "lock.fill"
+                        )
+                        .font(.footnote).foregroundStyle(.secondary)
                     }
                 } else {
                     Section {
-                        TextField("Organization UUID", text: $organizationID)
-                            .autocorrectionDisabled().textInputAutocapitalization(.never)
-                            .font(.caption.monospaced())
-                    } header: {
-                        Text("Organization")
-                    } footer: {
-                        Text("Only needed the first time a zone is published. Copy it from the dashboard or the seed.")
-                    }
+                        if let existing {
+                            LabeledContent("Building", value: existing.name)
+                            Text("Publishing again creates a new version and archives the current one. The old version is never overwritten.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            TextField("New building name", text: $buildingName)
+                            Text("Created in \(session.profile.organizationName ?? "your organization").")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
 
-                    Section {
                         Button {
                             Task { await publish() }
                         } label: {
                             HStack {
                                 if busy { ProgressView() }
-                                Text(zone.remoteBuildingID == nil ? "Publish Building Map" : "Publish New Version")
+                                Text(existing == nil ? "Publish Building Map" : "Publish New Version")
                             }
                             .frame(maxWidth: .infinity)
                         }
-                        .disabled(busy || dangling > 0 || (zone.remoteBuildingID == nil && UUID(uuidString: organizationID) == nil))
+                        .disabled(
+                            busy || dangling > 0
+                            || (existing == nil && buildingName.trimmingCharacters(in: .whitespaces).isEmpty)
+                        )
+                    } header: {
+                        Text("Publish")
                     }
                 }
 
@@ -84,9 +113,8 @@ struct PublishMapView: View {
                         LabeledContent("Version", value: "\(result.version)")
                         LabeledContent("Nodes", value: "\(result.nodeCount)")
                         LabeledContent("Edges", value: "\(result.edgeCount)")
-                        Text(result.buildingID.uuidString)
-                            .font(.caption2.monospaced()).foregroundStyle(.secondary)
-                        Text("Administrators can now block parts of this map, and this phone will reroute.")
+                        LabeledContent("Files uploaded", value: "\(result.artifactCount)")
+                        Text("Occupants in your organization can now download this building, and administrators can block parts of it.")
                             .font(.caption).foregroundStyle(.green)
                     }
                 }
@@ -102,38 +130,45 @@ struct PublishMapView: View {
                     Button(result == nil ? "Cancel" : "Done") { dismiss() }
                 }
             }
-        }
-    }
-
-    private func signIn() async {
-        busy = true; error = nil
-        defer { busy = false }
-        guard config.isConfigured, let url = URL(string: config.url) else {
-            error = BackendError.notConfigured.localizedDescription
-            return
-        }
-        do {
-            let c = SupabaseClient(supabaseURL: url, supabaseKey: config.anonKey)
-            _ = try await c.auth.signIn(email: email, password: password)
-            client = c
-            config.save()
-            signedIn = true
-        } catch {
-            self.error = error.localizedDescription
+            .task {
+                await session.refresh()
+                if buildingName.isEmpty {
+                    buildingName = zone.building.isEmpty ? zone.displayTitle : zone.building
+                }
+            }
         }
     }
 
     private func publish() async {
-        guard let client else { return }
         busy = true; error = nil
         defer { busy = false }
         do {
-            let publisher = MapPublisher(client: client)
-            let outcome = try await publisher.publish(
+            guard let client = session.service.currentClient else {
+                throw BackendError.notConfigured
+            }
+            guard let organizationID = session.profile.organizationID else {
+                throw BackendError.notConfigured
+            }
+
+            // Create the building first when this map has never been published,
+            // so the server assigns the organization from the caller's profile.
+            var buildingID = zone.remoteBuildingID
+            var name = existing?.name ?? buildingName.trimmingCharacters(in: .whitespaces)
+            if buildingID == nil {
+                let created = try await session.service.createBuilding(
+                    name: name, address: zone.campus, description: nil
+                )
+                buildingID = created.id
+                name = created.name
+            }
+
+            let outcome = try await MapPublisher(client: client).publish(
                 zone: zone,
                 graph: graph,
-                organizationID: UUID(uuidString: organizationID) ?? UUID(),
-                existingBuildingID: zone.remoteBuildingID
+                organizationID: organizationID,
+                existingBuildingID: buildingID,
+                buildingName: name,
+                artifacts: artifacts
             )
             result = outcome
 
@@ -141,6 +176,7 @@ struct PublishMapView: View {
             updated.remoteBuildingID = outcome.buildingID
             updated.updatedAt = Date()
             await repository.upsert(updated)
+            try await session.service.loadCatalog()
             onPublished(outcome.buildingID)
         } catch {
             self.error = error.localizedDescription
