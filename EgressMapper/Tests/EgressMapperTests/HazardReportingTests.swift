@@ -145,7 +145,11 @@ final class HazardReroutingTests: XCTestCase {
             try ShortestPathService.findBestEgressRoute(
                 from: b.start, graph: b.graph.applying(hazards: active.hazards), profile: .standard
             )
-        ) { XCTAssertEqual($0 as? RoutingError, .noRoute) }
+        ) { error in
+            guard case RoutingError.allRoutesBlocked = error else {
+                return XCTFail("expected allRoutesBlocked, got \(error)")
+            }
+        }
     }
 
     func testHazardAndAccessibilityConstraintsCombine() throws {
