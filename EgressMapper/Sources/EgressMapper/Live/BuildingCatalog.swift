@@ -93,6 +93,114 @@ struct BuildingEntry: Identifiable, Hashable {
 
     var isRemote: Bool { remote != nil }
     var isLocalOnly: Bool { remote == nil && localZone != nil }
+
+    /// What this user may do with this row. Mirrors what RLS enforces on the
+    /// server: an occupant seeing an edit control would be a UI bug, but the
+    /// server would reject the write regardless.
+    func actions(for profile: UserProfile) -> [BuildingAction] {
+        var available: [BuildingAction] = []
+
+        if profile.canManageBuildings {
+            if localZone != nil {
+                available += [.openDraft, .edit, .testRoute]
+                available.append(remote == nil ? .attachToBuilding : .publishUpdate)
+            }
+            if remote != nil {
+                available.append(.viewPublicationState)
+            }
+        }
+
+        if let remote, remote.isPublished {
+            switch availability {
+            case .downloadRequired, .downloadFailed:
+                available.append(.download)
+            case .updateAvailable:
+                available += [.update, .useInEmergency]
+            case .offlineAvailable:
+                available += [.useInEmergency, .removeDownload]
+            case .publishedByYou:
+                available.append(.useInEmergency)
+                // A mapper's own device may still not hold the *published*
+                // package — only the local draft it was published from.
+                available.append(.download)
+            case .downloading, .localDraft:
+                break
+            }
+            available.append(.viewBuilding)
+        } else if localZone != nil {
+            available.append(.useInEmergency)
+        }
+
+        // Stable, de-duplicated order so the row does not reshuffle.
+        var seen: Set<BuildingAction> = []
+        return BuildingAction.displayOrder.filter { available.contains($0) && seen.insert($0).inserted }
+    }
+}
+
+/// Every action a Saved Maps row can offer. Which ones appear is decided by
+/// role and availability, never by the view.
+enum BuildingAction: String, Hashable, CaseIterable {
+    // Administrator / mapper
+    case openDraft
+    case edit
+    case attachToBuilding
+    case testRoute
+    case publishUpdate
+    case viewPublicationState
+    // Everyone
+    case viewBuilding
+    case download
+    case update
+    case useInEmergency
+    case removeDownload
+
+    /// True for the actions that write to the backend. Only a mapper or
+    /// administrator ever sees these, and RLS rejects them for anyone else.
+    var requiresManageRole: Bool {
+        switch self {
+        case .openDraft, .edit, .attachToBuilding, .testRoute, .publishUpdate, .viewPublicationState:
+            return true
+        case .viewBuilding, .download, .update, .useInEmergency, .removeDownload:
+            return false
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .openDraft: return "Open Draft"
+        case .edit: return "Edit"
+        case .attachToBuilding: return "Attach to Building"
+        case .testRoute: return "Test Route"
+        case .publishUpdate: return "Publish Update"
+        case .viewPublicationState: return "Publication State"
+        case .viewBuilding: return "View Building"
+        case .download: return "Download"
+        case .update: return "Update"
+        case .useInEmergency: return "Use in Emergency"
+        case .removeDownload: return "Remove Download"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .openDraft: return "folder"
+        case .edit: return "pencil"
+        case .attachToBuilding: return "link"
+        case .testRoute: return "figure.walk"
+        case .publishUpdate: return "arrow.up.circle"
+        case .viewPublicationState: return "info.circle"
+        case .viewBuilding: return "building.2"
+        case .download: return "arrow.down.circle"
+        case .update: return "arrow.triangle.2.circlepath"
+        case .useInEmergency: return "figure.run"
+        case .removeDownload: return "trash"
+        }
+    }
+
+    static let displayOrder: [BuildingAction] = [
+        .useInEmergency, .download, .update, .openDraft, .edit, .testRoute,
+        .attachToBuilding, .publishUpdate, .viewBuilding, .viewPublicationState, .removeDownload,
+    ]
 }
 
 /// Merges the organization catalogue with locally saved zones and the download
@@ -101,16 +209,21 @@ enum BuildingCatalogMerger {
 
     /// A local zone and a remote building are the same thing when the zone
     /// records the remote id it was published to.
+    /// - Parameter transient: in-flight states (downloading, failed) that no
+    ///   amount of stored data can imply. They win over the computed value.
     static func merge(
         remote: [CatalogBuilding],
         localZones: [MappingZone],
         cachedVersion: (UUID) -> Int?,
-        profile: UserProfile
+        profile: UserProfile,
+        transient: [UUID: BuildingAvailability] = [:]
     ) -> [BuildingEntry] {
         var entries: [BuildingEntry] = []
         var claimedZoneIDs: Set<UUID> = []
 
         for building in remote {
+            // One card per published building. A local zone that was published
+            // to it is folded in rather than listed a second time.
             let zone = localZones.first { $0.remoteBuildingID == building.id }
             if let zone { claimedZoneIDs.insert(zone.id) }
 
@@ -121,7 +234,7 @@ enum BuildingCatalogMerger {
                     subtitle: subtitle(for: building),
                     remote: building,
                     localZone: zone,
-                    availability: availability(
+                    availability: transient[building.id] ?? availability(
                         for: building,
                         hasLocalZone: zone != nil,
                         cached: cachedVersion(building.id),

@@ -154,3 +154,53 @@ begin
     update public.map_versions set status = 'published', published_at = now() where id = mapv;
     update public.buildings set active_map_version_id = mapv, status = 'published' where id = bldg;
 end $$;
+
+-- MARK: Map package artifacts -------------------------------------------------
+-- One published version carrying a package, and one draft carrying a package,
+-- so the security checks can prove drafts stay invisible to occupants.
+
+do $$
+declare
+    bldg  uuid := '33333333-3333-3333-3333-333333333333';
+    mapv  uuid := '44444444-4444-4444-4444-444444444444';
+    draft uuid := '44444444-4444-4444-4444-444444444445';
+    admin_uid uuid := '55555555-5555-5555-5555-555555555551';
+    n_room uuid := 'a0000000-0000-0000-0000-000000000001';
+begin
+    insert into public.map_artifacts (
+        map_version_id, building_id, zone_id, kind, storage_path,
+        byte_size, checksum, schema_version, metadata
+    ) values (
+        mapv, bldg, bldg, 'package',
+        bldg || '/' || mapv || '/manifest.json',
+        1024, 'seed-checksum-published', 1,
+        '{"local_file_name":"manifest.json","floor_id":"floor-2"}'::jsonb
+    ), (
+        mapv, bldg, bldg, 'worldmap',
+        bldg || '/' || mapv || '/worldmap.arexperience',
+        204800, 'seed-checksum-worldmap', 1,
+        '{"local_file_name":"worldmap.arexperience","floor_id":"floor-2"}'::jsonb
+    )
+    on conflict (map_version_id, kind, storage_path) do nothing;
+
+    -- An unpublished next version. Nothing here may reach an occupant.
+    insert into public.map_versions (id, building_id, version, status, created_by)
+    values (draft, bldg, 2, 'draft', admin_uid)
+    on conflict (id) do nothing;
+
+    insert into public.map_artifacts (
+        map_version_id, building_id, zone_id, kind, storage_path,
+        byte_size, checksum, schema_version, metadata
+    ) values (
+        draft, bldg, bldg, 'package',
+        bldg || '/' || draft || '/manifest.json',
+        2048, 'seed-checksum-draft', 1,
+        '{"local_file_name":"manifest.json"}'::jsonb
+    )
+    on conflict (map_version_id, kind, storage_path) do nothing;
+
+    insert into public.room_aliases (map_version_id, node_stable_id, alias, source)
+    values (mapv, n_room, 'Rm. 214', 'manual'),
+           (mapv, n_room, 'Lecture Hall 214', 'sign')
+    on conflict (map_version_id, node_stable_id, alias) do nothing;
+end $$;
