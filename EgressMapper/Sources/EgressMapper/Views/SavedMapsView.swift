@@ -37,6 +37,21 @@ struct SavedMapsView: View {
                 }
             }
 
+            // A map whose metadata will not decode must say so. Dropping it
+            // from the list would look identical to never having saved it.
+            if !repository.damagedZoneIDs.isEmpty {
+                Section {
+                    Label(
+                        "\(repository.damagedZoneIDs.count) saved map\(repository.damagedZoneIDs.count == 1 ? "" : "s") on this device could not be read. Their folders are still present, so nothing has been deleted.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                    ForEach(repository.damagedZoneIDs, id: \.self) { id in
+                        Text(id.uuidString).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Section {
                 if entries.isEmpty {
                     ContentUnavailableView(

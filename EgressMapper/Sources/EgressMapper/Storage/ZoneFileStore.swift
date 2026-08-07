@@ -55,8 +55,18 @@ struct ZoneFileStore {
         try? FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true)
     }
 
+    /// Canonical directory for a zone: uppercase, matching `UUID.uuidString`.
     func directory(for id: UUID) -> URL {
         root.appendingPathComponent(id.uuidString, isDirectory: true)
+    }
+
+    /// The directory actually holding this zone. Falls back to a differently
+    /// cased name if one exists, so a zone stays readable on a case-sensitive
+    /// volume where the canonical path would miss.
+    func existingDirectory(for id: UUID) -> URL? {
+        let canonical = directory(for: id)
+        if FileManager.default.fileExists(atPath: canonical.path) { return canonical }
+        return zoneDirectories()[id]
     }
 
     private func ensureDirectory(for id: UUID) throws {
@@ -64,7 +74,7 @@ struct ZoneFileStore {
     }
 
     func url(_ id: UUID, _ file: String) -> URL {
-        directory(for: id).appendingPathComponent(file)
+        (existingDirectory(for: id) ?? directory(for: id)).appendingPathComponent(file)
     }
 
     // MARK: - Codable helpers
@@ -101,19 +111,246 @@ struct ZoneFileStore {
         try writeJSON(zone, to: url(zone.id, "zone.json"))
     }
 
+    // MARK: - Atomic commit
+    //
+    // Finishing a mapping walk used to write each file straight into the final
+    // zone directory, with `zone.json` written last. Anything that threw part
+    // way left a directory holding a world map but no metadata — and a zone
+    // with no `zone.json` is invisible to `listZones`, so the map the user had
+    // just recorded silently vanished. Everything is now staged, read back,
+    // and only then moved into place.
+
+    /// What a commit produced, so a failure can name the component that broke
+    /// rather than reporting a generic error.
+    struct CommitResult: Equatable {
+        var zoneID: UUID
+        var wroteWorldMap: Bool
+        var wroteReferenceImage: Bool
+        var waypointCount: Int
+        var pathPoints: Int
+    }
+
+    enum CommitError: LocalizedError, Equatable {
+        case write(component: String, detail: String)
+        case validation(component: String)
+        case replace(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .write(let component, let detail):
+                return "Could not write \(component): \(detail). Your previous saved copy is untouched."
+            case .validation(let component):
+                return "\(component) could not be read back after saving, so the map was not saved. Your previous saved copy is untouched."
+            case .replace(let detail):
+                return "Could not finalise the saved map: \(detail). Your previous saved copy is untouched."
+            }
+        }
+
+        /// The specific thing that failed, for the retry UI.
+        var component: String {
+            switch self {
+            case .write(let component, _), .validation(let component): return component
+            case .replace: return "Zone directory"
+            }
+        }
+    }
+
+    /// Writes a complete zone atomically.
+    ///
+    /// Staged into a sibling directory, validated by reading every artifact
+    /// back, then swapped in with a directory move. A failure at any point
+    /// leaves the previously saved zone exactly as it was.
+    @discardableResult
+    func commitZone(
+        _ zone: MappingZone,
+        waypoints: [Waypoint],
+        path: RoutePath,
+        worldMap: Data?,
+        graph: BuildingGraph? = nil,
+        referenceImage: Data? = nil,
+        referenceViews: [(view: ZoneReferenceView, data: Data)] = []
+    ) throws -> CommitResult {
+        let fm = FileManager.default
+        let staging = root.appendingPathComponent(
+            ".staging-\(zone.id.uuidString)-\(UUID().uuidString)", isDirectory: true
+        )
+
+        func stagedURL(_ name: String) -> URL { staging.appendingPathComponent(name) }
+        func fail(_ error: CommitError) -> CommitError {
+            try? fm.removeItem(at: staging)
+            return error
+        }
+
+        do {
+            try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        } catch {
+            throw CommitError.write(component: "Zone folder", detail: error.localizedDescription)
+        }
+
+        // 1. Write everything into staging.
+        do {
+            try writeJSON(zone, to: stagedURL("zone.json"))
+        } catch {
+            throw fail(.write(component: "Zone details", detail: error.localizedDescription))
+        }
+        do {
+            try writeJSON(waypoints, to: stagedURL("waypoints.json"))
+            try writeJSON(path, to: stagedURL("path.json"))
+        } catch {
+            throw fail(.write(component: "Waypoints", detail: error.localizedDescription))
+        }
+        if let graph {
+            do {
+                try writeJSON(graph, to: stagedURL("graph.json"))
+            } catch {
+                throw fail(.write(component: "Route graph", detail: error.localizedDescription))
+            }
+        }
+        if let worldMap {
+            do {
+                try worldMap.write(to: stagedURL("worldmap.arexperience"), options: .atomic)
+            } catch {
+                throw fail(.write(component: "AR world map", detail: error.localizedDescription))
+            }
+        }
+        if let referenceImage {
+            do {
+                try referenceImage.write(to: stagedURL("reference.jpg"), options: .atomic)
+            } catch {
+                throw fail(.write(component: "Reference image", detail: error.localizedDescription))
+            }
+        }
+        if !referenceViews.isEmpty {
+            do {
+                for item in referenceViews {
+                    try item.data.write(to: stagedURL(item.view.fileName), options: .atomic)
+                }
+                try writeJSON(referenceViews.map(\.view), to: stagedURL("references.json"))
+            } catch {
+                throw fail(.write(component: "Reference views", detail: error.localizedDescription))
+            }
+        }
+
+        // 2. Read every artifact back before anything is promoted.
+        guard let readBack = readJSON(MappingZone.self, from: stagedURL("zone.json")),
+              readBack.id == zone.id else {
+            throw fail(.validation(component: "Zone details"))
+        }
+        guard let storedWaypoints = readJSON([Waypoint].self, from: stagedURL("waypoints.json")),
+              storedWaypoints.count == waypoints.count else {
+            throw fail(.validation(component: "Waypoints"))
+        }
+        guard let storedPath = readJSON(RoutePath.self, from: stagedURL("path.json")) else {
+            throw fail(.validation(component: "Recorded path"))
+        }
+        if let graph {
+            guard let storedGraph = readJSON(BuildingGraph.self, from: stagedURL("graph.json")),
+                  storedGraph.nodes.count == graph.nodes.count else {
+                throw fail(.validation(component: "Route graph"))
+            }
+        }
+        if let worldMap {
+            // Byte-for-byte, and then that it still unarchives into an
+            // ARWorldMap — a file that exists but cannot decode is worse than
+            // no file, because the zone looks complete and fails later.
+            guard let storedMap = try? Data(contentsOf: stagedURL("worldmap.arexperience")),
+                  storedMap.count == worldMap.count else {
+                throw fail(.validation(component: "AR world map"))
+            }
+            guard Self.worldMapDecodes(storedMap) else {
+                throw fail(.validation(component: "AR world map"))
+            }
+        }
+
+        // 3. Swap it in. The old directory is kept aside until the new one is
+        //    safely in place, then removed.
+        let destination = directory(for: zone.id)
+        var retired: URL?
+        if fm.fileExists(atPath: destination.path) {
+            let aside = root.appendingPathComponent(
+                ".retired-\(zone.id.uuidString)-\(UUID().uuidString)", isDirectory: true
+            )
+            do {
+                try fm.moveItem(at: destination, to: aside)
+                retired = aside
+            } catch {
+                throw fail(.replace(error.localizedDescription))
+            }
+        }
+        do {
+            try fm.moveItem(at: staging, to: destination)
+        } catch {
+            // Put the previous version back rather than leaving nothing.
+            if let retired { try? fm.moveItem(at: retired, to: destination) }
+            throw fail(.replace(error.localizedDescription))
+        }
+        if let retired { try? fm.removeItem(at: retired) }
+
+        return CommitResult(
+            zoneID: zone.id,
+            wroteWorldMap: worldMap != nil,
+            wroteReferenceImage: referenceImage != nil,
+            waypointCount: storedWaypoints.count,
+            pathPoints: storedPath.count
+        )
+    }
+
+    /// Overridable in tests, where a real `ARWorldMap` cannot be constructed.
+    nonisolated(unsafe) static var worldMapDecodes: (Data) -> Bool = { data in
+        (try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data)) != nil
+    }
+
+    /// Removes leftover staging/retired directories from an interrupted save.
+    /// They are prefixed with a dot and are never listed as zones, but there is
+    /// no reason to keep them.
+    func cleanUpInterruptedSaves() {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil
+        ) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix(".staging-")
+            || entry.lastPathComponent.hasPrefix(".retired-") {
+            try? FileManager.default.removeItem(at: entry)
+        }
+    }
+
     func loadZone(_ id: UUID) -> MappingZone? {
         readJSON(MappingZone.self, from: url(id, "zone.json"))
     }
 
-    func listZones() -> [MappingZone] {
+    /// Zone directories present on disk, keyed by id. Directory names are
+    /// written uppercase, but a name that differs only in case still resolves —
+    /// the id is the identity, not the spelling.
+    private func zoneDirectories() -> [UUID: URL] {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else {
-            return []
+            return [:]
         }
-        return entries
-            .compactMap { UUID(uuidString: $0.lastPathComponent) }
+        var found: [UUID: URL] = [:]
+        for entry in entries {
+            let name = entry.lastPathComponent
+            // Staging and retired leftovers are dot-prefixed and never zones.
+            guard !name.hasPrefix("."), let id = UUID(uuidString: name) else { continue }
+            found[id] = entry
+        }
+        return found
+    }
+
+    func listZones() -> [MappingZone] {
+        zoneDirectories().keys
             .compactMap { loadZone($0) }
             .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Zone directories that exist but whose metadata will not decode.
+    ///
+    /// Without this a corrupt zone is indistinguishable from one that was never
+    /// saved: it simply drops out of the list. Callers surface it so the user
+    /// sees "this map is damaged" rather than an unexplained empty screen.
+    func damagedZoneIDs() -> [UUID] {
+        zoneDirectories()
+            .filter { loadZone($0.key) == nil }
+            .keys
+            .sorted { $0.uuidString < $1.uuidString }
     }
 
     func deleteZone(_ id: UUID) throws {

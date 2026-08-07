@@ -11,6 +11,48 @@ enum ARSessionMode {
     case navigating
 }
 
+/// What the camera feed itself is doing, independent of tracking quality.
+///
+/// Tracking can read "normal" while no frames are arriving at all, so this is
+/// deliberately a separate axis: it answers "is the preview live?", which is
+/// what the user is actually looking at.
+enum CameraFeedState: Equatable {
+    case idle
+    /// Running and receiving frames.
+    case active
+    /// Running, but no frame has arrived for longer than the watchdog allows.
+    case stalled(seconds: Int)
+    /// ARKit reported an interruption (phone call, backgrounding, another app
+    /// taking the camera). The map is still held in memory.
+    case interrupted
+    /// Re-running the session after an interruption, without resetting tracking.
+    case recovering
+    /// The session failed outright and cannot continue without user action.
+    case failed(String)
+
+    var isLive: Bool { self == .active }
+
+    var label: String {
+        switch self {
+        case .idle: return "Camera idle"
+        case .active: return "Camera feed active"
+        case .stalled(let seconds): return "No camera frames for \(seconds)s"
+        case .interrupted: return "Session interrupted"
+        case .recovering: return "Recovering…"
+        case .failed(let reason): return "Session failed — \(reason)"
+        }
+    }
+
+    /// Whether the user should be shown an explicit recovery screen rather
+    /// than a black rectangle.
+    var needsRecoveryUI: Bool {
+        switch self {
+        case .stalled, .interrupted, .recovering, .failed: return true
+        case .idle, .active: return false
+        }
+    }
+}
+
 enum ARSessionError: LocalizedError {
     case unsupported
     case cameraDenied
@@ -52,6 +94,14 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     private(set) var isSaving = false
     var lastError: String?
 
+    /// State of the camera feed, shown by the debug indicator and used to put
+    /// an explicit recovery screen over the AR view instead of black.
+    private(set) var cameraFeed: CameraFeedState = .idle
+    /// Timestamp of the most recent frame ARKit delivered.
+    private(set) var lastFrameTime: Date?
+    /// Frames seen since the session last started. Diagnostic only.
+    private(set) var frameCount: Int = 0
+
     /// Set once relocalization succeeds and saved anchors are matched.
     private(set) var restoredAnchorCount = 0
 
@@ -91,12 +141,29 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     private var currentMapping: ARFrame.WorldMappingStatus = .notAvailable
     private let store: ZoneFileStore
     private let recognizer = RoomSignRecognizer()
+    /// The configuration currently running, kept so an interruption can be
+    /// resumed with the *same* configuration and no tracking reset.
+    private var activeConfiguration: ARWorldTrackingConfiguration?
+    private var watchdog: Timer?
+    /// Frames stop for a moment during normal operation; this is the point at
+    /// which a gap stops being normal.
+    static let frameStallSeconds: TimeInterval = 2.0
+    /// Identifies this manager in the log, so two live sessions are obvious.
+    let instanceID = UUID()
 
     init(store: ZoneFileStore = ZoneFileStore()) {
         self.store = store
         super.init()
         session.delegate = self
+        DiagnosticsLog.shared.log("ARSessionManager \(shortID) created")
     }
+
+    deinit {
+        watchdog?.invalidate()
+        DiagnosticsLog.shared.log("ARSessionManager \(instanceID.uuidString.prefix(8)) released")
+    }
+
+    var shortID: String { String(instanceID.uuidString.prefix(8)) }
 
     static var isSupported: Bool { ARWorldTrackingConfiguration.isSupported }
 
@@ -114,10 +181,21 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
 
     func startMapping(zone: MappingZone) throws {
         guard Self.isSupported else { throw ARSessionError.unsupported }
+        // Re-entering an already-running mapping session must not reset
+        // tracking: that would throw away the map the user is recording.
+        if mode == .mapping, self.zone?.id == zone.id, activeConfiguration != nil {
+            DiagnosticsLog.shared.log("startMapping \(shortID) ignored — already mapping this zone")
+            return
+        }
         self.zone = zone
         mode = .mapping
         resetRecording()
-        session.run(makeConfiguration(), options: [.resetTracking, .removeExistingAnchors])
+        let config = makeConfiguration()
+        activeConfiguration = config
+        session.delegate = self
+        session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        beginFrameWatchdog()
+        DiagnosticsLog.shared.log("startMapping \(shortID) zone=\(zone.id.uuidString.prefix(8))")
     }
 
     /// Loads a saved zone and attempts to relocalize against its world map.
@@ -132,20 +210,105 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
         self.relocalizationSeconds = 0
         mode = .relocalizing
         clearMarkers()
-        session.run(makeConfiguration(initialMap: worldMap), options: [.resetTracking, .removeExistingAnchors])
+        let config = makeConfiguration(initialMap: worldMap)
+        activeConfiguration = config
+        session.delegate = self
+        session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        beginFrameWatchdog()
+        DiagnosticsLog.shared.log("startRelocalizing \(shortID)")
     }
 
     func pause() {
         session.pause()
+        cameraFeed = .idle
+        stopFrameWatchdog()
     }
 
     func stop() {
         session.pause()
+        stopFrameWatchdog()
         clearMarkers()
         recognizer.reset()
         lastRecognizedSign = nil
         mode = .idle
-        DiagnosticsLog.shared.log("AR session stopped")
+        cameraFeed = .idle
+        activeConfiguration = nil
+        DiagnosticsLog.shared.log("AR session \(shortID) stopped")
+    }
+
+    // MARK: - Camera liveness
+
+    /// Frames are the only reliable evidence the preview is live. Tracking
+    /// state is not: ARKit can keep reporting `.normal` after it has stopped
+    /// delivering frames, which is exactly the frozen-preview case.
+    private func beginFrameWatchdog() {
+        stopFrameWatchdog()
+        lastFrameTime = nil
+        frameCount = 0
+        cameraFeed = .active
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkFrameLiveness() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        watchdog = timer
+    }
+
+    private func stopFrameWatchdog() {
+        watchdog?.invalidate()
+        watchdog = nil
+    }
+
+    private func checkFrameLiveness() {
+        guard mode != .idle else { return }
+        // An interrupted or failed session has its own state; do not overwrite
+        // it with a stall report.
+        switch cameraFeed {
+        case .interrupted, .recovering, .failed: return
+        default: break
+        }
+        guard let last = lastFrameTime else { return }
+        let gap = Date().timeIntervalSince(last)
+        if gap >= Self.frameStallSeconds {
+            let seconds = Int(gap)
+            if cameraFeed != .stalled(seconds: seconds) {
+                cameraFeed = .stalled(seconds: seconds)
+                DiagnosticsLog.shared.log(
+                    "\(shortID) camera stalled \(seconds)s (tracking=\(status.quality), frames=\(frameCount))"
+                )
+            }
+        } else if cameraFeed != .active {
+            cameraFeed = .active
+        }
+    }
+
+    /// Re-runs the *same* configuration without resetting tracking, so an
+    /// interrupted mapping walk keeps the map it has already built.
+    func resumeAfterInterruption() {
+        guard mode != .idle, let config = activeConfiguration else { return }
+        cameraFeed = .recovering
+        DiagnosticsLog.shared.log("\(shortID) resuming session, preserving the existing map")
+        session.delegate = self
+        session.run(config, options: [])
+        beginFrameWatchdog()
+        cameraFeed = .recovering
+    }
+
+    /// Called when the app returns to the foreground.
+    func handleScenePhaseActive() {
+        DiagnosticsLog.shared.log("\(shortID) scenePhase active, mode=\(mode)")
+        guard mode != .idle else { return }
+        if cameraFeed.needsRecoveryUI || lastFrameTime == nil {
+            resumeAfterInterruption()
+        }
+    }
+
+    func handleScenePhaseBackground() {
+        DiagnosticsLog.shared.log("\(shortID) scenePhase background, mode=\(mode)")
+        guard mode != .idle else { return }
+        // ARKit suspends the session itself; record it so the return path
+        // knows to re-run rather than assuming frames will resume.
+        cameraFeed = .interrupted
+        stopFrameWatchdog()
     }
 
     private func resetRecording() {
@@ -169,6 +332,9 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     // ARKit delivers these on the main queue by default (delegateQueue == nil).
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        lastFrameTime = Date()
+        frameCount += 1
+        if cameraFeed != .active { cameraFeed = .active }
         currentMapping = frame.worldMappingStatus
         let newStatus = TrackingStatus.interpret(
             tracking: frame.camera.trackingState,
@@ -236,14 +402,31 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didFailWithError error: Error) {
         lastError = error.localizedDescription
+        cameraFeed = .failed(error.localizedDescription)
+        stopFrameWatchdog()
+        DiagnosticsLog.shared.log("\(shortID) session failed: \(error.localizedDescription)")
     }
 
     func sessionWasInterrupted(_ session: ARSession) {
-        lastError = "AR session interrupted."
+        cameraFeed = .interrupted
+        stopFrameWatchdog()
+        DiagnosticsLog.shared.log("\(shortID) session interrupted (mode=\(mode))")
     }
 
+    /// ARKit does not resume on its own in a way that keeps the preview live —
+    /// the session must be re-run. Crucially with no options, so the map built
+    /// so far is preserved.
     func sessionInterruptionEnded(_ session: ARSession) {
         lastError = nil
+        DiagnosticsLog.shared.log("\(shortID) interruption ended")
+        resumeAfterInterruption()
+    }
+
+    /// ARKit offers to relocalize after an interruption. Accepting it keeps the
+    /// existing map and coordinate space, which is what a half-finished mapping
+    /// walk needs; the alternative silently restarts the map.
+    func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool {
+        true
     }
 
     // MARK: - Path recording
@@ -356,26 +539,54 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
         let map = try await currentWorldMap()
         let snapshot = await snapshotImage()
 
-        var updated = zone
-        updated.waypointCount = waypoints.count
-        updated.pathLength = path.totalDistance
-        updated.hasWorldMap = true
-        updated.hasReferenceImage = snapshot != nil
-        updated.updatedAt = Date()
-
+        // Serialising the world map and encoding the JPEG are the expensive
+        // parts, and both are done off the main thread so the camera renderer
+        // keeps running while the save happens.
         let waypointsCopy = waypoints
         let pathCopy = path
         let store = self.store
 
-        try await Task.detached(priority: .userInitiated) {
-            try store.saveWorldMap(map, zoneID: updated.id)
-            try store.saveWaypoints(waypointsCopy, zoneID: updated.id)
-            try store.savePath(pathCopy, zoneID: updated.id)
-            if let snapshot { try store.saveReferenceImage(snapshot, zoneID: updated.id) }
-            try store.saveZone(updated)
+        var updated = zone
+        updated.waypointCount = waypoints.count
+        updated.pathLength = path.totalDistance
+        updated.updatedAt = Date()
+        // Set from what actually landed on disk, below — never asserted up
+        // front, or a zone claims a world map it does not have.
+        updated.hasWorldMap = false
+        updated.hasReferenceImage = false
+
+        let prepared = updated
+        let result = try await Task.detached(priority: .userInitiated) { () -> (MappingZone, ZoneFileStore.CommitResult) in
+            let mapData: Data
+            do {
+                mapData = try NSKeyedArchiver.archivedData(
+                    withRootObject: map, requiringSecureCoding: true
+                )
+            } catch {
+                throw ZoneFileStore.CommitError.write(
+                    component: "AR world map", detail: error.localizedDescription
+                )
+            }
+            let imageData = snapshot?.jpegData(compressionQuality: 0.7)
+
+            var zone = prepared
+            zone.hasWorldMap = true
+            zone.hasReferenceImage = imageData != nil
+
+            let commit = try store.commitZone(
+                zone,
+                waypoints: waypointsCopy,
+                path: pathCopy,
+                worldMap: mapData,
+                referenceImage: imageData
+            )
+            return (zone, commit)
         }.value
 
-        return updated
+        DiagnosticsLog.shared.log(
+            "Saved zone \(result.1.zoneID.uuidString.prefix(8)) — \(result.1.waypointCount) waypoints, \(result.1.pathPoints) path points, worldMap=\(result.1.wroteWorldMap)"
+        )
+        return result.0
     }
 
     private func currentWorldMap() async throws -> ARWorldMap {
