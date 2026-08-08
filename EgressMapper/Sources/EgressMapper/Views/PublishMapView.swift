@@ -20,8 +20,9 @@ struct PublishMapView: View {
 
     private var dangling: Int { MapPublisher.danglingEdgeCount(in: graph) }
 
-    private var artifacts: [PendingArtifact] {
-        MapPublisher.artifacts(for: zone, store: repository.store)
+    /// File sizes only. The bytes are read once, inside `publish()`.
+    private var summary: MapPublisher.ArtifactSummary {
+        MapPublisher.artifactSummary(for: zone, store: repository.store)
     }
 
     /// The building this zone was already published to, if any.
@@ -51,19 +52,13 @@ struct PublishMapView: View {
                 }
 
                 Section("Localization package") {
-                    LabeledContent(
-                        "AR world map",
-                        value: artifacts.contains { $0.kind == .worldmap } ? "Included" : "None"
-                    )
-                    LabeledContent(
-                        "Reference views",
-                        value: "\(artifacts.filter { $0.kind == .referenceImage }.count)"
-                    )
+                    let summary = self.summary
+                    LabeledContent("AR world map", value: summary.hasWorldMap ? "Included" : "None")
+                    LabeledContent("Reference views", value: "\(summary.referenceViewCount)")
                     LabeledContent(
                         "Upload size",
                         value: ByteCountFormatter.string(
-                            fromByteCount: Int64(artifacts.reduce(0) { $0 + $1.data.count }),
-                            countStyle: .file
+                            fromByteCount: Int64(summary.totalBytes), countStyle: .file
                         )
                     )
                 }
@@ -168,7 +163,7 @@ struct PublishMapView: View {
                 organizationID: organizationID,
                 existingBuildingID: buildingID,
                 buildingName: name,
-                artifacts: artifacts
+                artifacts: MapPublisher.artifacts(for: zone, store: repository.store)
             )
             result = outcome
 

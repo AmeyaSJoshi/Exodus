@@ -88,7 +88,7 @@ struct GuidanceView: View {
                 guidanceOverlay
             }
         }
-        .alert("Navigation", isPresented: .constant(errorMessage != nil)) {
+        .alert("Navigation", isPresented: .presenting($errorMessage)) {
             // A route ruled out by this phone's own hazard reports must be
             // recoverable from here. Sending the user "Back" was the only
             // option, which left them unable to undo their own report.

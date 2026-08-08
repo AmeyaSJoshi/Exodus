@@ -66,12 +66,12 @@ struct MappingView: View {
                 )
             }
         }
-        .alert("Mapping", isPresented: .constant(errorMessage != nil)) {
+        .alert("Mapping", isPresented: .presenting($errorMessage)) {
             Button("OK") { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
         }
-        .alert("Save Failed", isPresented: .constant(saveFailure != nil)) {
+        .alert("Save Failed", isPresented: .presenting($saveFailure)) {
             Button("Try Again") { saveFailure = nil; Task { await finish() } }
             Button("Keep Mapping", role: .cancel) { saveFailure = nil }
         } message: {
