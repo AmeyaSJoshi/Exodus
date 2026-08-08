@@ -189,6 +189,21 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     /// on-screen arrow and a sixth of the invalidation cost of every frame.
     static let posePublishInterval: TimeInterval = 0.1
     @ObservationIgnored private var lastPosePublish = Date.distantPast
+    /// Set while a sheet covers the AR view. Recording and tracking continue
+    /// untouched; only the *published* pose stops, so the view behind the sheet
+    /// stops re-rendering. Without this, every SwiftUI body over a live session
+    /// re-ran ten times a second while the user was typing, and the keyboard
+    /// fought that for the main thread.
+    var isUIPaused = false {
+        didSet {
+            guard isUIPaused != oldValue else { return }
+            DiagnosticsLog.shared.log("\(shortID) UI updates \(isUIPaused ? "paused" : "resumed")")
+            if !isUIPaused {
+                cameraPosition = latestPosition
+                cameraHeading = latestHeading
+            }
+        }
+    }
     /// The newest pose, regardless of what has been published. Routing reads
     /// this so throttling the UI never costs accuracy.
     @ObservationIgnored private(set) var latestPosition: SIMD3<Float> = .zero
@@ -460,7 +475,7 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
         // arrow needs and leaves the renderer its main-thread budget.
         latestPosition = position
         latestHeading = heading
-        if now.timeIntervalSince(lastPosePublish) >= Self.posePublishInterval {
+        if !isUIPaused, now.timeIntervalSince(lastPosePublish) >= Self.posePublishInterval {
             lastPosePublish = now
             cameraPosition = position
             cameraHeading = heading

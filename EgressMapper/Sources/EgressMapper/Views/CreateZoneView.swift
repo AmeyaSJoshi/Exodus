@@ -9,6 +9,7 @@ struct CreateZoneView: View {
     @State private var floor = ""
     @State private var zoneName = ""
     @State private var startedZone: MappingZone?
+    @State private var firstEditLogged = false
 
     private var isValid: Bool {
         !building.trimmingCharacters(in: .whitespaces).isEmpty &&
@@ -40,6 +41,14 @@ struct CreateZoneView: View {
                     }
                     .disabled(!isValid)
                 }
+            }
+            .onAppear { Startup.firstUse("create-zone-form") }
+            // Names the cost of the first keystroke, which is where the
+            // keyboard's own cold start lands. Logs once, then stays quiet.
+            .onChange(of: zoneName) { _, _ in
+                guard !firstEditLogged else { return }
+                firstEditLogged = true
+                Startup.firstUse("create-zone-first-keystroke")
             }
             .navigationTitle("New Zone")
             .navigationBarTitleDisplayMode(.inline)
