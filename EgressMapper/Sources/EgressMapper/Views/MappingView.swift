@@ -45,6 +45,18 @@ struct MappingView: View {
                 addWaypoint(type: type, name: name)
             }
             .presentationDetents([.height(280)])
+            .onAppear {
+                Startup.firstUse("room-editor")
+                DiagnosticsLog.shared.log("Room editor presented over \(manager.shortID)")
+            }
+            .onDisappear {
+                // The moment the freeze is reported. What the manager logs
+                // straight after this line says whether the session stopped or
+                // only the renderer did.
+                DiagnosticsLog.shared.log(
+                    "Room editor dismissed — frames=\(manager.frameCount) lastRender=\(manager.secondsSinceRender.map { String(format: "%.2fs ago", $0) } ?? "never") feed=\(manager.cameraFeed.label)"
+                )
+            }
         }
         .alert("Mapping", isPresented: .constant(errorMessage != nil)) {
             Button("OK") { errorMessage = nil }
@@ -197,6 +209,7 @@ struct MappingView: View {
     // MARK: - Actions
 
     private func start() {
+        Startup.firstUse("mapping-open")
         do {
             try manager.startMapping(zone: zone)
         } catch {

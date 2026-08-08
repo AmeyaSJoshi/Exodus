@@ -33,12 +33,15 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(isPresented: $showEmergency) {
                 EmergencyBuildingListView(session: session)
+                    .onAppear { Startup.firstUse("emergency-open") }
             }
             .navigationDestination(isPresented: $showConfigure) {
                 ConfigureView()
+                    .onAppear { Startup.firstUse("configure-open") }
             }
             .navigationDestination(isPresented: $showSavedZones) {
                 SavedMapsView(session: session)
+                    .onAppear { Startup.firstUse("saved-maps-open") }
             }
             // The coordinator owns this; every screen calling its own refresh
             // is what produced overlapping scans and catalogue requests.
@@ -96,6 +99,7 @@ struct HomeView: View {
     private var secondaryActions: some View {
         VStack(spacing: 12) {
             Button {
+                Startup.log("tap: Configure")
                 showConfigure = true
             } label: {
                 Label("Configure", systemImage: "slider.horizontal.3")
@@ -107,6 +111,7 @@ struct HomeView: View {
             .tint(.white)
 
             Button {
+                Startup.log("tap: Saved Maps")
                 showSavedZones = true
             } label: {
                 Label("Saved Maps (\(repository.zones.count))", systemImage: "map")

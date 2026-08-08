@@ -61,6 +61,31 @@ enum Startup {
         DiagnosticsLog.shared.log("[+\(ms)ms] \(message)")
     }
 
+    /// Records the first time a named screen or action is reached, and how
+    /// long after launch. First-use latency is the symptom, so the log has to
+    /// make "this is the first time" explicit rather than leaving it implied.
+    nonisolated(unsafe) private static var seen: Set<String> = []
+    private static let seenLock = NSLock()
+
+    @discardableResult
+    static func firstUse(_ name: String) -> Bool {
+        seenLock.lock()
+        let isFirst = seen.insert(name).inserted
+        seenLock.unlock()
+        if isFirst { log("FIRST \(name)") } 
+        return isFirst
+    }
+
+    /// Brackets a synchronous span and logs it when it is slow enough to be
+    /// felt. Used on the main actor, where anything over a frame matters.
+    static func measure<T>(_ name: String, _ body: () -> T) -> T {
+        let started = Date()
+        let value = body()
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        if ms >= 16 { log("\(name) blocked the main actor for \(ms)ms") }
+        return value
+    }
+
     /// Measures an awaited stage and records how long it took.
     static func stage<T>(_ name: StaticString, _ body: () async throws -> T) async rethrows -> T {
         let state = signposter.beginInterval(name)
