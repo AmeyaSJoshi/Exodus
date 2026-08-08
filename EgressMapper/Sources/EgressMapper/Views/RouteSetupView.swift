@@ -38,9 +38,15 @@ struct RouteSetupView: View {
         )
     }
 
+    /// Route testing may target anywhere on the map — walking to a specific
+    /// room is a normal thing to want. Emergency mode is the opposite and
+    /// deliberately offers exits only, because that is the whole point of it.
+    /// Exits sort first so the common case stays one tap away.
     private var destinations: [Waypoint] {
-        let exits = waypoints.filter { $0.type.isDestination }
-        return exits.isEmpty ? waypoints : exits
+        waypoints.sorted { a, b in
+            if a.type.isDestination != b.type.isDestination { return a.type.isDestination }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
     }
 
     var body: some View {
@@ -159,16 +165,21 @@ struct RouteSetupView: View {
 
     private var destinationSection: some View {
         Section {
-            Picker("Exit to", selection: $destination) {
+            Picker("Navigate to", selection: $destination) {
                 Text("Select…").tag(Waypoint?.none)
                 ForEach(destinations) { w in
-                    Text(w.name).tag(Waypoint?.some(w))
+                    Label(w.name, systemImage: w.type.symbolName)
+                        .tag(Waypoint?.some(w))
                 }
             }
         } header: {
             Text("Destination")
         } footer: {
-            routeSummary
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Any waypoint can be a destination here. Emergency mode always routes to an exit.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                routeSummary
+            }
         }
     }
 
