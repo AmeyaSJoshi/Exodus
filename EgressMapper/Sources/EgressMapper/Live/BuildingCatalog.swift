@@ -100,24 +100,18 @@ struct BuildingEntry: Identifiable, Hashable {
     func actions(for profile: UserProfile) -> [BuildingAction] {
         var available: [BuildingAction] = []
 
-        // Same rule the merge uses: a device with no resolved account is
-        // treated as its own mapper, so a map just recorded on this phone can
-        // be opened before anyone signs in. Once an account resolves to an
-        // occupant, the write actions disappear — and RLS refuses them anyway.
-        let mayManage = profile.canManageBuildings || !profile.hasOrganization
-
-        if mayManage {
-            if localZone != nil {
-                available += [.openDraft, .edit, .testRoute, .deleteLocalMap]
-                // Attaching to a building is a server write, so it needs a
-                // real administrator account, not merely a signed-out device.
-                if profile.canManageBuildings {
-                    available.append(remote == nil ? .attachToBuilding : .publishUpdate)
-                }
+        // Anything that only touches this device is available to whoever is
+        // holding it — recording, opening, testing and deleting your own map
+        // are not privileges. Only the actions that write to the backend are
+        // gated, and RLS refuses those independently.
+        if localZone != nil {
+            available += [.openDraft, .edit, .testRoute, .deleteLocalMap]
+            if profile.canManageBuildings {
+                available.append(remote == nil ? .attachToBuilding : .publishUpdate)
             }
-            if remote != nil, profile.canManageBuildings {
-                available += [.viewPublicationState, .deleteBuilding]
-            }
+        }
+        if remote != nil, profile.canManageBuildings {
+            available += [.viewPublicationState, .deleteBuilding]
         }
 
         if let remote, remote.isPublished {
@@ -171,12 +165,17 @@ enum BuildingAction: String, Hashable, CaseIterable {
 
     /// True for the actions that write to the backend. Only a mapper or
     /// administrator ever sees these, and RLS rejects them for anyone else.
+    ///
+    /// Opening, editing, testing and deleting a map held on this device are
+    /// deliberately *not* in this list. They change nothing anyone else can
+    /// see, so gating them on a role only ever hid someone's own work from
+    /// them.
     var requiresManageRole: Bool {
         switch self {
-        case .openDraft, .edit, .attachToBuilding, .testRoute, .publishUpdate,
-             .viewPublicationState, .deleteLocalMap, .deleteBuilding:
+        case .attachToBuilding, .publishUpdate, .viewPublicationState, .deleteBuilding:
             return true
-        case .viewBuilding, .download, .update, .useInEmergency, .removeDownload:
+        case .openDraft, .edit, .testRoute, .deleteLocalMap,
+             .viewBuilding, .download, .update, .useInEmergency, .removeDownload:
             return false
         }
     }
@@ -265,23 +264,23 @@ enum BuildingCatalogMerger {
             )
         }
 
-        // Zones that were never published stay visible to their mapper, and to
-        // a signed-out device: these are recordings made on this phone, and
-        // losing sight of them until you sign in would be absurd. Once an
-        // account resolves to an occupant, they are hidden.
-        if profile.canManageBuildings || !profile.hasOrganization {
-            for zone in localZones where !claimedZoneIDs.contains(zone.id) {
-                entries.append(
-                    BuildingEntry(
-                        id: zone.id,
-                        name: zone.displayTitle,
-                        subtitle: zone.displaySubtitle,
-                        remote: nil,
-                        localZone: zone,
-                        availability: .localDraft
-                    )
+        // A zone that was never published is a recording made on *this phone*,
+        // by whoever is holding it. It is not organization data, so role has no
+        // business filtering it: hiding an occupant's own map made it look like
+        // the save had failed. Anyone may record and open their own maps; only
+        // an administrator may push one to the backend, which is enforced in
+        // `actions(for:)` and by RLS.
+        for zone in localZones where !claimedZoneIDs.contains(zone.id) {
+            entries.append(
+                BuildingEntry(
+                    id: zone.id,
+                    name: zone.displayTitle,
+                    subtitle: zone.displaySubtitle,
+                    remote: nil,
+                    localZone: zone,
+                    availability: .localDraft
                 )
-            }
+            )
         }
 
         return entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }

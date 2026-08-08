@@ -74,12 +74,37 @@ final class SavedMapsMergeTests: XCTestCase {
         XCTAssertEqual(entries[0].availability, .localDraft)
     }
 
-    func testAStudentNeverSeesLocalDrafts() {
-        let entries = BuildingCatalogMerger.merge(
-            remote: [], localZones: [localZone("Half-mapped Hall")],
-            cachedVersion: { _ in nil }, profile: student()
-        )
-        XCTAssertTrue(entries.isEmpty, "an occupant has no business seeing an unpublished draft")
+    /// A map recorded on this phone belongs to whoever recorded it. Hiding an
+    /// occupant's own recording made a successful save look like a failed one.
+    func testAnyAccountSeesTheMapsItRecordedOnThisDevice() {
+        for profile in [student(), admin(), UserProfile.empty] {
+            let entries = BuildingCatalogMerger.merge(
+                remote: [], localZones: [localZone("My House")],
+                cachedVersion: { _ in nil }, profile: profile
+            )
+            XCTAssertEqual(entries.count, 1, "role \(profile.role ?? "none") lost its own recording")
+            XCTAssertEqual(entries[0].availability, .localDraft)
+        }
+    }
+
+    /// Recording is open to everyone; pushing to the backend is not.
+    func testAnOccupantCanUseItsOwnDraftButNotPublishIt() {
+        let profile = student()
+        let entry = BuildingCatalogMerger.merge(
+            remote: [], localZones: [localZone("My House")],
+            cachedVersion: { _ in nil }, profile: profile
+        )[0]
+        let actions = entry.actions(for: profile)
+
+        XCTAssertTrue(actions.contains(.openDraft))
+        XCTAssertTrue(actions.contains(.edit))
+        XCTAssertTrue(actions.contains(.testRoute))
+        XCTAssertTrue(actions.contains(.useInEmergency))
+        XCTAssertTrue(actions.contains(.deleteLocalMap))
+
+        XCTAssertFalse(actions.contains(.attachToBuilding), "publishing stays administrator-only")
+        XCTAssertFalse(actions.contains(.publishUpdate))
+        XCTAssertTrue(actions.allSatisfy { !$0.requiresManageRole })
     }
 
     // MARK: - Availability
@@ -166,7 +191,6 @@ final class SavedMapsMergeTests: XCTestCase {
                     "occupant was offered \(actions.filter(\.requiresManageRole))"
                 )
                 XCTAssertFalse(actions.contains(.publishUpdate))
-                XCTAssertFalse(actions.contains(.edit))
                 XCTAssertFalse(actions.contains(.attachToBuilding))
             }
         }
@@ -264,6 +288,16 @@ final class SavedMapsDeleteTests: XCTestCase {
 
     /// Deleting a building is a server write; a device with no account may
     /// only remove its own recording.
+    func testAnOccupantMayDeleteItsOwnRecordingButNotABuilding() {
+        let profile = student()
+        let actions = BuildingCatalogMerger.merge(
+            remote: [], localZones: [localZone("My House")],
+            cachedVersion: { _ in nil }, profile: profile
+        )[0].actions(for: profile)
+        XCTAssertTrue(actions.contains(.deleteLocalMap))
+        XCTAssertFalse(actions.contains(.deleteBuilding))
+    }
+
     func testASignedOutDeviceCanDeleteItsRecordingButNotABuilding() {
         let entry = BuildingCatalogMerger.merge(
             remote: [], localZones: [localZone("Half-mapped Hall")],
@@ -289,9 +323,14 @@ final class SavedMapsDeleteTests: XCTestCase {
         }
     }
 
-    func testBothDeletesAreTreatedAsWriteActions() {
+    /// Only backend writes are privileged. Deleting a file this phone owns is
+    /// not one of them.
+    func testOnlyBackendWritesArePrivileged() {
         XCTAssertTrue(BuildingAction.deleteBuilding.requiresManageRole)
-        XCTAssertTrue(BuildingAction.deleteLocalMap.requiresManageRole)
+        XCTAssertTrue(BuildingAction.attachToBuilding.requiresManageRole)
+        XCTAssertTrue(BuildingAction.publishUpdate.requiresManageRole)
+        XCTAssertFalse(BuildingAction.deleteLocalMap.requiresManageRole)
+        XCTAssertFalse(BuildingAction.openDraft.requiresManageRole)
         XCTAssertFalse(BuildingAction.removeDownload.requiresManageRole)
     }
 
