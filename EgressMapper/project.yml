@@ -1,0 +1,42 @@
+name: EgressMapper
+options:
+  bundleIdPrefix: com.egress
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+targets:
+  EgressMapper:
+    type: application
+    platform: iOS
+    sources:
+      - Sources/EgressMapper
+    info:
+      path: Sources/EgressMapper/Info.plist
+      properties:
+        CFBundleDisplayName: EGRESS Mapper
+        UILaunchScreen: {}
+        NSCameraUsageDescription: EGRESS Mapper uses the camera for AR indoor mapping and navigation. Camera frames are processed on device and are never uploaded.
+        NSPhotoLibraryUsageDescription: Import a floor plan image to align with a recorded route.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.egress.mapper
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: "NO"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 553SS7SNPX
+  EgressMapperTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/EgressMapperTests
+    dependencies:
+      - target: EgressMapper
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: "YES"
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/EgressMapper.app/EgressMapper
+        BUNDLE_LOADER: $(TEST_HOST)
