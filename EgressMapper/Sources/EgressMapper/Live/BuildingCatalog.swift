@@ -100,12 +100,22 @@ struct BuildingEntry: Identifiable, Hashable {
     func actions(for profile: UserProfile) -> [BuildingAction] {
         var available: [BuildingAction] = []
 
-        if profile.canManageBuildings {
+        // Same rule the merge uses: a device with no resolved account is
+        // treated as its own mapper, so a map just recorded on this phone can
+        // be opened before anyone signs in. Once an account resolves to an
+        // occupant, the write actions disappear — and RLS refuses them anyway.
+        let mayManage = profile.canManageBuildings || !profile.hasOrganization
+
+        if mayManage {
             if localZone != nil {
                 available += [.openDraft, .edit, .testRoute]
-                available.append(remote == nil ? .attachToBuilding : .publishUpdate)
+                // Attaching to a building is a server write, so it needs a
+                // real administrator account, not merely a signed-out device.
+                if profile.canManageBuildings {
+                    available.append(remote == nil ? .attachToBuilding : .publishUpdate)
+                }
             }
-            if remote != nil {
+            if remote != nil, profile.canManageBuildings {
                 available.append(.viewPublicationState)
             }
         }

@@ -6,11 +6,14 @@ struct MappingView: View {
     var onFinish: () -> Void
 
     @Environment(ZoneRepository.self) private var repository
+    @Environment(\.scenePhase) private var scenePhase
     @State private var manager = ARSessionManager()
     @State private var pendingType: WaypointType?
     @State private var showMap = true
     @State private var errorMessage: String?
     @State private var isFinishing = false
+    @State private var hasLeft = false
+    @State private var saveFailure: String?
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -21,6 +24,7 @@ struct MappingView: View {
                 statusOverlay
                 if let sign = manager.lastRecognizedSign { ocrSuggestion(sign) }
                 if showMap { mapOverlay }
+                CameraDebugIndicator(manager: manager)
                 HeightControlView(manager: manager)
                 DebugOverlayView(manager: manager)
                 Spacer()
@@ -47,9 +51,49 @@ struct MappingView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+        .alert("Save Failed", isPresented: .constant(saveFailure != nil)) {
+            Button("Try Again") { saveFailure = nil; Task { await finish() } }
+            Button("Keep Mapping", role: .cancel) { saveFailure = nil }
+        } message: {
+            Text(saveFailure ?? "")
+        }
         .onAppear(perform: start)
-        .onDisappear { manager.stop() }
+        .onDisappear {
+            // A sheet presented over the mapping view (adding a waypoint) can
+            // fire onDisappear on the presenter. Stopping the session there
+            // pauses the camera — a black preview that never comes back —
+            // while the rest of the UI keeps working. Only stop when the
+            // mapping flow is genuinely being left.
+            guard isLeaving else {
+                DiagnosticsLog.shared.log("MappingView disappeared with a sheet up — session kept alive")
+                return
+            }
+            manager.stop()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active: manager.handleScenePhaseActive()
+            case .background, .inactive: manager.handleScenePhaseBackground()
+            @unknown default: break
+            }
+        }
+        .overlay {
+            // Never leave the user looking at a black rectangle with no
+            // explanation: an unhealthy camera gets an explicit screen.
+            if manager.cameraFeed.needsRecoveryUI {
+                CameraRecoveryView(
+                    state: manager.cameraFeed,
+                    waypointCount: manager.waypoints.count,
+                    onResume: { manager.resumeAfterInterruption() },
+                    onClose: { hasLeft = true; manager.stop(); onFinish() }
+                )
+            }
+        }
     }
+
+    /// True only once the user has finished or closed, so a modal presentation
+    /// is never mistaken for leaving the screen.
+    private var isLeaving: Bool { hasLeft }
 
     // MARK: - Overlays
 
@@ -64,7 +108,7 @@ struct MappingView: View {
                 } label: {
                     Image(systemName: showMap ? "map.fill" : "map")
                 }
-                Button("Close") { manager.stop(); onFinish() }
+                Button("Close") { hasLeft = true; manager.stop(); onFinish() }
                     .font(.caption)
             }
 
@@ -172,16 +216,28 @@ struct MappingView: View {
         }
     }
 
+    /// Only reports success once the zone has been written *and* read back, and
+    /// only then leaves the screen — so a failed save keeps the live session and
+    /// the recorded map, and the user can simply try again.
     private func finish() async {
         isFinishing = true
         defer { isFinishing = false }
         do {
             let saved = try await manager.finishMapping(zone: zone)
-            await repository.upsert(saved)
+            await repository.refresh()
+            guard repository.zones.contains(where: { $0.id == saved.id }) else {
+                saveFailure = "The map was written but did not appear in Saved Maps. Nothing was overwritten — please try saving again."
+                return
+            }
+            saveFailure = nil
+            hasLeft = true
             manager.stop()
             onFinish()
+        } catch let error as ZoneFileStore.CommitError {
+            saveFailure = error.errorDescription
+            DiagnosticsLog.shared.log("Save failed at component: \(error.component)")
         } catch {
-            errorMessage = error.localizedDescription
+            saveFailure = error.localizedDescription
         }
     }
 }

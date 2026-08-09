@@ -29,6 +29,12 @@ final class RoomSignRecognizer: @unchecked Sendable {
     var isEnabled = true
 
     /// Call with each AR frame's pixel buffer; internally rate-limited.
+    ///
+    /// The buffer is copied synchronously before any work is dispatched. It
+    /// belongs to ARKit's frame pool, and holding the original past this call
+    /// keeps its `ARFrame` alive — which starves the pool and freezes the
+    /// camera preview on device. The copy costs a few milliseconds at most,
+    /// once every `interval` seconds.
     func process(
         pixelBuffer: CVPixelBuffer,
         completion: @escaping (RecognizedSign) -> Void
@@ -37,11 +43,23 @@ final class RoomSignRecognizer: @unchecked Sendable {
         let now = Date()
         guard now.timeIntervalSince(lastRun) >= interval else { return }
         lastRun = now
+
+        let owned: CVPixelBuffer
+        do {
+            owned = try PixelBufferCopy.copy(pixelBuffer)
+        } catch {
+            // Never hold ARKit's buffer as a fallback: skipping this OCR pass
+            // is harmless, freezing the camera is not.
+            DiagnosticsLog.shared.log("OCR skipped — pixel buffer copy failed: \(error)")
+            return
+        }
+
         isRunning = true
 
         queue.async { [weak self] in
             guard let self else { return }
             defer { self.isRunning = false }
+            let pixelBuffer = owned
 
             let request = VNRecognizeTextRequest()
             // .fast keeps latency low enough not to disturb tracking.

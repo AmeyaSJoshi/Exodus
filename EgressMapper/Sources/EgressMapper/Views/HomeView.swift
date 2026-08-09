@@ -129,6 +129,7 @@ struct ConfigureView: View {
     @State private var showCreateZone = false
     @State private var showSavedZones = false
     @State private var profile = NavigationProfile.standard
+    @AppStorage(DeveloperSettings.debugIndicatorKey) private var showCameraDebug = false
 
     var body: some View {
         List {
@@ -159,12 +160,17 @@ struct ConfigureView: View {
                 }
             }
 
-            Section("Developer Tools") {
+            Section {
                 NavigationLink {
                     LiveDemoView()
                 } label: {
                     Label("Live Backend Diagnostics", systemImage: "stethoscope")
                 }
+                Toggle("Camera debug indicator", isOn: $showCameraDebug)
+            } header: {
+                Text("Developer Tools")
+            } footer: {
+                Text("The camera indicator shows feed, tracking and session state while mapping. Useful when diagnosing a frozen or black preview on a device.")
             }
 
             Section {

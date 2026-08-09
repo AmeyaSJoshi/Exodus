@@ -5,6 +5,9 @@ final class ZoneRepository {
     private(set) var zones: [MappingZone] = []
     private(set) var isLoading = false
     var lastError: String?
+    /// Zone folders on disk whose metadata will not decode. Surfaced in Saved
+    /// Maps so a damaged map reads as damaged rather than silently vanishing.
+    private(set) var damagedZoneIDs: [UUID] = []
 
     let store: ZoneFileStore
 
@@ -16,8 +19,14 @@ final class ZoneRepository {
     func refresh() async {
         isLoading = true
         let store = self.store
-        let loaded = await Task.detached(priority: .userInitiated) { store.listZones() }.value
-        zones = loaded
+        let result = await Task.detached(priority: .userInitiated) {
+            (zones: store.listZones(), damaged: store.damagedZoneIDs())
+        }.value
+        zones = result.zones
+        damagedZoneIDs = result.damaged
+        if !result.damaged.isEmpty {
+            DiagnosticsLog.shared.log("Damaged zone folders: \(result.damaged.count)")
+        }
         isLoading = false
     }
 
