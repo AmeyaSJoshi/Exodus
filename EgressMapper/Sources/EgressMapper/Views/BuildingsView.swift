@@ -24,18 +24,50 @@ final class BackendSession {
     var isSignedIn: Bool { service.signedInEmail != nil }
     var canManage: Bool { profile.canManageBuildings }
 
+    /// A request that never came back. An unreachable host does not fail fast
+    /// on its own — the socket just sits there — so a sign-in against a stale
+    /// LAN address would spin forever with nothing on screen to explain it.
+    struct BackendTimeout: Error {}
+
+    /// Runs `operation`, or throws `BackendTimeout` if it outlasts `seconds`.
+    private func withTimeout(
+        _ seconds: Double,
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in try await operation() }
+            group.addTask {
+                try await Task.sleep(for: .seconds(seconds))
+                throw BackendTimeout()
+            }
+            // Whichever finishes first decides; the loser is cancelled.
+            try await group.next()
+            group.cancelAll()
+        }
+    }
+
     func signIn() async {
         busy = true; error = nil
         defer { busy = false }
         do {
             try service.configure(config)
-            try await service.signIn(email: email, password: password)
-            try await service.loadProfile()
+            try await withTimeout(15) {
+                try await self.service.signIn(email: self.email, password: self.password)
+                try await self.service.loadProfile()
+            }
             guard service.profile.hasOrganization else {
                 error = "Your account is not assigned to an organization. Ask an administrator to add you."
                 return
             }
-            try await service.loadCatalog()
+            try await withTimeout(15) {
+                try await self.service.loadCatalog()
+                try await self.service.loadBuildings()
+            }
+        } catch is BackendTimeout {
+            // Naming the address turns the most common cause — the Mac's LAN
+            // IP moved, or the phone is on another network — into something
+            // the person holding the phone can diagnose without a debugger.
+            error = "Can't reach server at \(config.url). Check the Mac is running and both are on the same Wi-Fi."
         } catch {
             self.error = error.localizedDescription
         }
