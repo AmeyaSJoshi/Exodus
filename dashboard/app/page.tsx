@@ -253,7 +253,7 @@ function Console({ session, onSignOut }: { session: Session; onSignOut: () => vo
     if (!building || !selected) return;
     setBusy(true);
     setError(null);
-    const { error } = await supabase.rpc("set_edge_state", {
+    const { data, error } = await supabase.rpc("set_edge_state", {
       p_building_id: building.id,
       p_edge_stable_id: selected.stable_id,
       p_status: input.status,
@@ -263,19 +263,37 @@ function Console({ session, onSignOut }: { session: Session; onSignOut: () => vo
       p_expires_at: input.expiresAt,
     });
     setBusy(false);
-    if (error) setError(error.message);
+    if (error) return setError(error.message);
+    applyRow(data as LiveEdgeState | null);
+  }
+
+  /**
+   * The RPCs return the row they wrote, so the console shows the result of its
+   * own action immediately. Waiting for the Realtime echo meant that if the
+   * publication was not replicating this table the publish looked like it had
+   * silently failed, even though the row had been written.
+   */
+  function applyRow(row: LiveEdgeState | null) {
+    if (!row?.edge_stable_id) return;
+    setLive((prev) => {
+      const existing = prev[row.edge_stable_id];
+      if (existing && row.revision < existing.revision) return prev;
+      return { ...prev, [row.edge_stable_id]: row };
+    });
+    if (buildingID) void refreshActivity(buildingID);
   }
 
   async function clear() {
     if (!building || !selected) return;
     setBusy(true);
     setError(null);
-    const { error } = await supabase.rpc("clear_edge_state", {
+    const { data, error } = await supabase.rpc("clear_edge_state", {
       p_building_id: building.id,
       p_edge_stable_id: selected.stable_id,
     });
     setBusy(false);
-    if (error) setError(error.message);
+    if (error) return setError(error.message);
+    applyRow(data as LiveEdgeState | null);
   }
 
   // Verification goes through review_report, which writes the building-wide
@@ -295,6 +313,11 @@ function Console({ session, onSignOut }: { session: Session; onSignOut: () => vo
     setBusyReport(null);
     if (error) return setError(error.message);
     setReports((prev) => prev.filter((r) => r.id !== report.id));
+    if (status === "verified" && building) {
+      const { data } = await supabase.from("live_edge_states").select("*").eq("building_id", building.id);
+      if (data) setLive(Object.fromEntries(data.map((s: LiveEdgeState) => [s.edge_stable_id, s])));
+      void refreshActivity(building.id);
+    }
   }
 
   const connMeta =
