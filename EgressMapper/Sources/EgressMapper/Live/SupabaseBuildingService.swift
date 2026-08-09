@@ -152,7 +152,7 @@ final class SupabaseBuildingService: BuildingStateService {
         guard let client else { throw BackendError.notConfigured }
         buildings = try await client
             .from("buildings")
-            .select("id,name,address,active_map_version_id")
+            .select("id,name,address,active_map_version_id,anchor_lat,anchor_lng,anchor_alt_m,heading_deg,scale,formatted_address")
             .order("name")
             .execute()
             .value

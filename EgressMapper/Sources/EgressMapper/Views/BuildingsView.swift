@@ -53,6 +53,9 @@ final class BackendSession {
         do {
             try await service.loadProfile()
             try await service.loadCatalog()
+            // The catalogue RPC does not carry the georeference anchor, so the
+            // buildings table is read alongside it for the focus map.
+            try await service.loadBuildings()
             error = nil
         } catch {
             self.error = error.localizedDescription
@@ -236,6 +239,14 @@ struct BuildingsView: View {
                                 .font(.caption2).foregroundStyle(.secondary)
                             Button("Attach a saved map and publish") { attachTarget = building }
                                 .font(.caption)
+                            if let remote = session.service.buildings.first(where: { $0.id == building.id }) {
+                                NavigationLink {
+                                    FocusMapView(building: remote)
+                                } label: {
+                                    Label("View in 3D", systemImage: "view.3d")
+                                        .font(.caption)
+                                }
+                            }
                         }
                     }
                 }
