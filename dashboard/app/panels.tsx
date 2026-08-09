@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { AuditEntry, LiveEdgeState, RouteEdge, RouteNode, UserReport } from "@/lib/supabase";
+import { supabase, type AuditEntry, type Building, type LiveEdgeState, type RouteEdge, type RouteNode, type UserReport } from "@/lib/supabase";
 import {
   HAZARDS,
   REPORT_LABEL,
@@ -48,6 +48,114 @@ export function Panel({
 
 export function Empty({ children }: { children: React.ReactNode }) {
   return <p className="py-2 text-sm text-ink-3">{children}</p>;
+}
+
+/**
+ * Set (or update) a building's real-world location.
+ *
+ * Geocoding goes through a server route handler (Nominatim, no key). Saving
+ * the result goes straight through the same `supabase` client every other
+ * write in this dashboard uses — `buildings` is already RLS-protected admin-only, so no
+ * extra authorization check is needed here.
+ */
+export function BuildingLocation({
+  building,
+  canEdit,
+  onSaved,
+}: {
+  building: Building;
+  canEdit: boolean;
+  onSaved: (patch: Partial<Building>) => void;
+}) {
+  const [address, setAddress] = useState(building.formatted_address ?? building.address ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAddress(building.formatted_address ?? building.address ?? "");
+    setError(null);
+  }, [building.id, building.formatted_address, building.address]);
+
+  const hasAnchor = building.anchor_lat != null && building.anchor_lng != null;
+
+  async function setLocation(e: React.FormEvent) {
+    e.preventDefault();
+    if (!address.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/geocode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address }),
+      });
+      const geocoded = await res.json();
+      if (!res.ok) throw new Error(geocoded.error ?? "Could not geocode that address.");
+
+      const { error: dbError } = await supabase
+        .from("buildings")
+        .update({
+          anchor_lat: geocoded.lat,
+          anchor_lng: geocoded.lng,
+          formatted_address: geocoded.formatted_address,
+        })
+        .eq("id", building.id);
+      if (dbError) throw new Error(dbError.message);
+
+      setAddress(geocoded.formatted_address);
+      onSaved({
+        anchor_lat: geocoded.lat,
+        anchor_lng: geocoded.lng,
+        formatted_address: geocoded.formatted_address,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not set the location.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel title="Location">
+      <div className="space-y-3">
+        {canEdit ? (
+          <form onSubmit={setLocation} className="flex gap-2">
+            <input
+              aria-label="Address"
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+              placeholder="Street address"
+              className="w-full rounded-md border border-hairline bg-surface-2 px-3 py-2 text-sm placeholder:text-ink-3"
+            />
+            <button
+              type="submit"
+              disabled={busy || !address.trim()}
+              className="shrink-0 rounded-md bg-critical px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+            >
+              {busy ? "Saving…" : "Set location"}
+            </button>
+          </form>
+        ) : (
+          !hasAnchor && <Empty>This building has no location set.</Empty>
+        )}
+
+        {error && <p className="text-sm text-critical">{error}</p>}
+
+        {hasAnchor && (
+          <div className="space-y-2">
+            <p className="text-sm text-ink-2">{building.formatted_address}</p>
+            <iframe
+              src={`https://www.openstreetmap.org/export/embed.html?bbox=${(building.anchor_lng ?? 0) - 0.003},${(building.anchor_lat ?? 0) - 0.002},${(building.anchor_lng ?? 0) + 0.003},${(building.anchor_lat ?? 0) + 0.002}&layer=mapnik&marker=${building.anchor_lat},${building.anchor_lng}`}
+              title="map preview"
+              className="w-full rounded-lg border border-hairline"
+              width={480}
+              height={280}
+            />
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
 }
 
 /**

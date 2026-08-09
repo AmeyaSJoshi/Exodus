@@ -25,6 +25,19 @@ export type Building = {
   name: string;
   address: string | null;
   active_map_version_id: string | null;
+  anchor_lat: number | null;
+  anchor_lng: number | null;
+  anchor_alt_m: number;
+  heading_deg: number;
+  scale: number;
+  formatted_address: string | null;
+  footprint_geojson: GeoJSONPolygon | null;
+  footprint_height_m: number | null;
+};
+
+export type GeoJSONPolygon = {
+  type: "Polygon";
+  coordinates: number[][][];
 };
 
 export type MapVersion = { id: string; version: number; status: string; published_at: string | null };

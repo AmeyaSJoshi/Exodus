@@ -82,6 +82,7 @@ declare
     admin_uid    uuid := '55555555-5555-5555-5555-555555555551';
     viewer_uid   uuid := '55555555-5555-5555-5555-555555555552';
     outsider_uid uuid := '55555555-5555-5555-5555-555555555553';
+    soham_uid    uuid := '55555555-5555-5555-5555-555555555554';
 
     -- Graph stable ids mirror what the iPhone would upload.
     n_room  uuid := 'a0000000-0000-0000-0000-000000000001';
@@ -102,6 +103,7 @@ begin
     perform pg_temp.create_test_user(admin_uid,    'admin@egress.test',    'egress-admin-pw');
     perform pg_temp.create_test_user(viewer_uid,   'viewer@egress.test',   'egress-viewer-pw');
     perform pg_temp.create_test_user(outsider_uid, 'outsider@egress.test', 'egress-outsider-pw');
+    perform pg_temp.create_test_user(soham_uid,    'soham.pradhan.ca@gmail.com', 'egress-soham-pw');
 
     insert into public.organizations (id, name)
     values (org_a, 'Bellarmine College Preparatory'),
@@ -113,7 +115,8 @@ begin
     insert into public.profiles (id, organization_id, role, display_name) values
         (admin_uid,    org_a, 'admin',  'Demo Admin'),
         (viewer_uid,   org_a, 'viewer', 'Demo Occupant'),
-        (outsider_uid, org_b, 'admin',  'Outsider Admin')
+        (outsider_uid, org_b, 'admin',  'Outsider Admin'),
+        (soham_uid,    org_a, 'admin',  'Soham')
     on conflict (id) do update
         set organization_id = excluded.organization_id,
             role = excluded.role;

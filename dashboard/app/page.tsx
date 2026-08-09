@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import type { Session } from "@supabase/supabase-js";
 import {
   supabase,
@@ -15,7 +16,18 @@ import {
 } from "@/lib/supabase";
 import { type EdgeStatus, type HazardType } from "@/lib/model";
 import { GraphView } from "./graph";
-import { ActiveIncidents, ActivityFeed, Badge, Inspector, PendingReports } from "./panels";
+import { ActiveIncidents, ActivityFeed, Badge, BuildingLocation, Inspector, PendingReports } from "./panels";
+
+// Map3DElement is a DOM custom element and touches `window` at module load —
+// it cannot be server-rendered.
+const BuildingFocusView = dynamic(() => import("./focus").then((m) => m.BuildingFocusView), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[520px] items-center justify-center rounded-xl border border-hairline bg-surface text-sm text-ink-2">
+      Loading focus view…
+    </div>
+  ),
+});
 
 type Conn = "connecting" | "live" | "error" | "idle";
 
@@ -117,6 +129,7 @@ function Console({ session, onSignOut }: { session: Session; onSignOut: () => vo
   const [conn, setConn] = useState<Conn>("idle");
   const [selected, setSelected] = useState<RouteEdge | null>(null);
   const [floor, setFloor] = useState("all");
+  const [view, setView] = useState<"2d" | "focus">("2d");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [busyReport, setBusyReport] = useState<string | null>(null);
@@ -350,6 +363,21 @@ function Console({ session, onSignOut }: { session: Session; onSignOut: () => vo
               <option value="all">All floors</option>
               {floors.map((f) => <option key={f} value={f}>{f}</option>)}
             </select>
+            <div role="group" aria-label="View" className="flex overflow-hidden rounded-md border border-hairline">
+              {(["2d", "focus"] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  aria-pressed={view === v}
+                  onClick={() => setView(v)}
+                  className={`px-2.5 py-1.5 text-sm font-medium uppercase ${
+                    view === v ? "bg-critical text-white" : "bg-surface-2 text-ink-2"
+                  }`}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -384,14 +412,27 @@ function Console({ session, onSignOut }: { session: Session; onSignOut: () => vo
 
         <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
           <div className="space-y-4">
-            <GraphView
-              nodes={visibleNodes}
-              edges={visibleEdges}
-              nodeByStable={nodeByStable}
-              live={live}
-              selected={selected}
-              onSelect={setSelected}
-            />
+            {view === "2d" ? (
+              <GraphView
+                nodes={visibleNodes}
+                edges={visibleEdges}
+                nodeByStable={nodeByStable}
+                live={live}
+                selected={selected}
+                onSelect={setSelected}
+              />
+            ) : building ? (
+              <BuildingFocusView
+                building={building}
+                nodes={nodes}
+                edges={edges}
+                allFloors={floors}
+                canEdit={profile?.role === "admin"}
+                onFootprintCached={(patch) =>
+                  setBuildings((prev) => prev.map((b) => (b.id === building.id ? { ...b, ...patch } : b)))
+                }
+              />
+            ) : null}
             <div className="grid gap-4 md:grid-cols-2 xl:hidden">
               <ActiveIncidents live={live} edges={edges} nodeByStable={nodeByStable} onSelect={setSelected} />
               <ActivityFeed entries={audit} edges={edges} nodeByStable={nodeByStable} />
@@ -399,6 +440,15 @@ function Console({ session, onSignOut }: { session: Session; onSignOut: () => vo
           </div>
 
           <div className="space-y-4">
+            {building && (
+              <BuildingLocation
+                building={building}
+                canEdit={profile?.role === "admin"}
+                onSaved={(patch) =>
+                  setBuildings((prev) => prev.map((b) => (b.id === building.id ? { ...b, ...patch } : b)))
+                }
+              />
+            )}
             <Inspector
               edge={selected}
               nodeByStable={nodeByStable}

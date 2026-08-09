@@ -627,6 +627,151 @@ begin
 end $$;
 reset role;
 
+-- MARK: Building georeference (anchor) -----------------------------------------
+-- No new policy exists for these columns — they ride the same owner-only
+-- policies that already gate the rest of the `buildings` row (see the
+-- migration comment in 20260806000900_building_georeference.sql).
+
+do $$
+declare
+    bldg uuid := '33333333-3333-3333-3333-333333333333';
+    lat  double precision;
+    lng  double precision;
+    addr text;
+begin
+    perform pg_temp.act_as('admin@egress.test');
+    update public.buildings
+       set anchor_lat = 37.422, anchor_lng = -122.084,
+           formatted_address = '1600 Amphitheatre Parkway, Mountain View, CA 94043, USA'
+     where id = bldg;
+
+    select anchor_lat, anchor_lng, formatted_address into lat, lng, addr
+    from public.buildings where id = bldg;
+
+    perform pg_temp.assert(lat = 37.422 and lng = -122.084, 'admin can set the building anchor');
+    perform pg_temp.assert(
+        addr = '1600 Amphitheatre Parkway, Mountain View, CA 94043, USA',
+        'admin can set the formatted address'
+    );
+end $$;
+reset role;
+
+do $$
+declare
+    bldg    uuid := '33333333-3333-3333-3333-333333333333';
+    updated integer;
+    denied  boolean := false;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+    begin
+        update public.buildings set anchor_lat = 0, anchor_lng = 0 where id = bldg;
+        get diagnostics updated = row_count;
+        denied := (updated = 0);
+    exception when others then
+        denied := true;
+    end;
+    perform pg_temp.assert(denied, 'occupant cannot set the building anchor');
+end $$;
+reset role;
+
+do $$
+declare
+    bldg    uuid := '33333333-3333-3333-3333-333333333333';
+    visible integer;
+    updated integer;
+    denied  boolean := false;
+begin
+    -- An admin, but of a different organization: this building's anchor is
+    -- invisible and unwritable to them, same as the rest of the row.
+    perform pg_temp.act_as('outsider@egress.test');
+    select count(*) into visible from public.buildings where id = bldg and anchor_lat is not null;
+    perform pg_temp.assert(visible = 0, 'other org cannot read this building''s anchor');
+
+    begin
+        update public.buildings set anchor_lat = 1, anchor_lng = 1 where id = bldg;
+        get diagnostics updated = row_count;
+        denied := (updated = 0);
+    exception when others then
+        denied := true;
+    end;
+    perform pg_temp.assert(denied, 'other org cannot write this building''s anchor');
+end $$;
+reset role;
+
+do $$
+declare
+    bldg   uuid := '33333333-3333-3333-3333-333333333333';
+    n      integer;
+    denied boolean;
+begin
+    set local role anon;
+    set local request.jwt.claims = '{"role":"anon"}';
+
+    denied := false;
+    begin
+        select count(*) into n from public.buildings where id = bldg;
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot read a building''s anchor');
+
+    denied := false;
+    begin
+        update public.buildings set anchor_lat = 2, anchor_lng = 2 where id = bldg;
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot write a building''s anchor');
+end $$;
+reset role;
+
+-- MARK: Building footprint cache -----------------------------------------------
+-- Same reasoning as the anchor columns: no dedicated policy, these ride the
+-- owner-only policies already on `buildings`.
+
+do $$
+declare
+    bldg uuid := '33333333-3333-3333-3333-333333333333';
+    h    double precision;
+begin
+    perform pg_temp.act_as('admin@egress.test');
+    update public.buildings
+       set footprint_geojson = '{"type":"Polygon","coordinates":[[[0,0],[0,1],[1,1],[0,0]]]}'::jsonb,
+           footprint_height_m = 12
+     where id = bldg;
+
+    select footprint_height_m into h from public.buildings where id = bldg;
+    perform pg_temp.assert(h = 12, 'admin can cache a building footprint');
+end $$;
+reset role;
+
+do $$
+declare
+    bldg    uuid := '33333333-3333-3333-3333-333333333333';
+    updated integer;
+    denied  boolean := false;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+    begin
+        update public.buildings set footprint_height_m = 99 where id = bldg;
+        get diagnostics updated = row_count;
+        denied := (updated = 0);
+    exception when others then
+        denied := true;
+    end;
+    perform pg_temp.assert(denied, 'occupant cannot write a building footprint');
+end $$;
+reset role;
+
+do $$
+declare
+    bldg    uuid := '33333333-3333-3333-3333-333333333333';
+    visible integer;
+begin
+    perform pg_temp.act_as('outsider@egress.test');
+    select count(*) into visible from public.buildings where id = bldg and footprint_geojson is not null;
+    perform pg_temp.assert(visible = 0, 'other org cannot read this building''s footprint');
+end $$;
+reset role;
+
 -- MARK: Deleting a building --------------------------------------------------
 
 do $$
