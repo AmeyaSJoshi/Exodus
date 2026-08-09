@@ -435,7 +435,10 @@ begin
     select count(*) into n from public.buildings where status = 'draft';
     perform pg_temp.assert(n = 0, 'student cannot see draft buildings');
 
-    select count(*) into n from public.map_artifacts;
+    select count(*) into n
+    from public.map_artifacts a
+    join public.map_versions mv on mv.id = a.map_version_id
+    where mv.status <> 'published';
     perform pg_temp.assert(n = 0, 'student cannot read draft map artifacts');
 
     select count(*) into n from public.organization_buildings() ob,
@@ -486,6 +489,141 @@ begin
     r := public.my_profile();
     perform pg_temp.assert(r ->> 'role' = 'viewer', 'my_profile reports the caller''s role');
     perform pg_temp.assert(r ->> 'organization_id' is not null, 'my_profile reports the organization');
+end $$;
+reset role;
+
+-- MARK: Map package artifacts and Storage authorization -----------------------
+
+do $$
+declare
+    bldg  uuid := '33333333-3333-3333-3333-333333333333';
+    mapv  uuid := '44444444-4444-4444-4444-444444444444';
+    draft uuid := '44444444-4444-4444-4444-444444444445';
+    n integer;
+begin
+    -- Published version: readable by an occupant of the same organization.
+    perform pg_temp.act_as('viewer@egress.test');
+    select jsonb_array_length(public.map_package_artifacts(mapv)) into n;
+    perform pg_temp.assert(n = 2, 'student can list published package artifacts');
+
+    -- Draft version: invisible, even though it belongs to their own building.
+    select jsonb_array_length(public.map_package_artifacts(draft)) into n;
+    perform pg_temp.assert(n = 0, 'student cannot list draft package artifacts');
+
+    -- Checksums travel with the manifest so the client can verify downloads.
+    select count(*) into n
+    from jsonb_array_elements(public.map_package_artifacts(mapv)) e
+    where e ->> 'checksum' is not null and (e ->> 'byte_size')::bigint > 0;
+    perform pg_temp.assert(n = 2, 'published artifacts carry a checksum and size');
+end $$;
+reset role;
+
+do $$
+declare
+    bldg  uuid := '33333333-3333-3333-3333-333333333333';
+    draft uuid := '44444444-4444-4444-4444-444444444445';
+    n integer;
+begin
+    perform pg_temp.act_as('admin@egress.test');
+    select jsonb_array_length(public.map_package_artifacts(draft)) into n;
+    perform pg_temp.assert(n = 1, 'administrator can list their own draft artifacts');
+end $$;
+reset role;
+
+do $$
+declare
+    mapv uuid := '44444444-4444-4444-4444-444444444444';
+    n integer;
+begin
+    perform pg_temp.act_as('outsider@egress.test');
+    select jsonb_array_length(public.map_package_artifacts(mapv)) into n;
+    perform pg_temp.assert(n = 0, 'other organization cannot list package artifacts');
+end $$;
+reset role;
+
+-- The Storage read policy authorizes on the path, so the helpers that parse and
+-- classify a path are themselves part of the security boundary.
+do $$
+declare
+    bldg  uuid := '33333333-3333-3333-3333-333333333333';
+    mapv  uuid := '44444444-4444-4444-4444-444444444444';
+    draft uuid := '44444444-4444-4444-4444-444444444445';
+begin
+    perform pg_temp.assert(
+        public.storage_path_map_version(bldg || '/' || mapv || '/manifest.json') = mapv,
+        'storage path parser extracts the map version segment'
+    );
+    perform pg_temp.assert(
+        public.storage_path_map_version('not-a-path') is null,
+        'a malformed storage path yields no map version'
+    );
+    perform pg_temp.assert(
+        public.storage_path_map_version(bldg || '/nonsense/manifest.json') is null,
+        'a non-uuid version segment yields no map version'
+    );
+    perform pg_temp.assert(
+        public.map_version_is_published(mapv),
+        'published version is reported published'
+    );
+    perform pg_temp.assert(
+        not public.map_version_is_published(draft),
+        'draft version is not reported published'
+    );
+    perform pg_temp.assert(
+        not public.map_version_is_published(null),
+        'an unparseable path can never satisfy the published check'
+    );
+end $$;
+reset role;
+
+-- Occupants must not be able to write artifact rows for any version.
+do $$
+declare
+    bldg    uuid := '33333333-3333-3333-3333-333333333333';
+    mapv    uuid := '44444444-4444-4444-4444-444444444444';
+    blocked boolean := false;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+    begin
+        insert into public.map_artifacts (
+            map_version_id, building_id, kind, storage_path, byte_size, checksum
+        ) values (mapv, bldg, 'worldmap', bldg || '/' || mapv || '/evil.bin', 1, 'x');
+    exception when others then blocked := true;
+    end;
+    perform pg_temp.assert(blocked, 'occupant cannot upload map artifacts');
+
+    blocked := false;
+    begin
+        insert into public.room_aliases (map_version_id, node_stable_id, alias)
+        values (mapv, 'a0000000-0000-0000-0000-000000000001', 'Fake Room');
+    exception when others then blocked := true;
+    end;
+    perform pg_temp.assert(blocked, 'occupant cannot write room aliases');
+end $$;
+reset role;
+
+-- Aliases are how a scanned sign resolves to a node; occupants must read them.
+do $$
+declare
+    mapv uuid := '44444444-4444-4444-4444-444444444444';
+    n integer;
+begin
+    perform pg_temp.act_as('viewer@egress.test');
+    select count(*) into n from public.room_aliases where map_version_id = mapv;
+    perform pg_temp.assert(n = 2, 'student can read published room aliases');
+end $$;
+reset role;
+
+do $$
+declare denied boolean := false;
+begin
+    set local role anon;
+    set local request.jwt.claims = '{"role":"anon"}';
+    begin
+        perform public.map_package_artifacts('44444444-4444-4444-4444-444444444444');
+    exception when others then denied := true;
+    end;
+    perform pg_temp.assert(denied, 'anonymous cannot list package artifacts');
 end $$;
 reset role;
 

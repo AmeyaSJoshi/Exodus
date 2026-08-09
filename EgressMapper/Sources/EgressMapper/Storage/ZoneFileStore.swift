@@ -16,6 +16,29 @@ enum ZoneStoreError: LocalizedError {
     }
 }
 
+/// One saved photograph of a mapped zone, taken from a stated direction.
+/// Several of these per zone is what lets relocalization succeed from more
+/// than the single angle the zone was originally captured from.
+struct ZoneReferenceView: Codable, Hashable, Identifiable {
+    var id: UUID
+    var fileName: String
+    /// Free text shown to the user: "facing the stairwell", "from the lobby".
+    var viewpoint: String
+    var capturedAt: Date
+
+    init(
+        id: UUID = UUID(),
+        fileName: String,
+        viewpoint: String,
+        capturedAt: Date = Date()
+    ) {
+        self.id = id
+        self.fileName = fileName
+        self.viewpoint = viewpoint
+        self.capturedAt = capturedAt
+    }
+}
+
 /// On-disk layout:
 /// Application Support/Zones/<uuid>/{zone,waypoints,path,alignment}.json,
 ///                                  worldmap.arexperience, reference.jpg, floorplan.jpg
@@ -148,6 +171,63 @@ struct ZoneFileStore {
 
     func loadReferenceImage(_ zoneID: UUID) -> UIImage? {
         UIImage(contentsOfFile: url(zoneID, "reference.jpg").path)
+    }
+
+    // MARK: - Additional reference viewpoints
+    //
+    // Relocalizing only ever worked from the one angle the original
+    // `reference.jpg` was shot from. Extra views are stored alongside it as
+    // `reference-<uuid>.jpg`, indexed by `references.json`. The legacy file is
+    // left exactly where it is, so every existing zone keeps working.
+
+    func referenceViews(_ zoneID: UUID) -> [ZoneReferenceView] {
+        var views = readJSON([ZoneReferenceView].self, from: url(zoneID, "references.json")) ?? []
+        // Surface the original single image as an unlabelled viewpoint.
+        if FileManager.default.fileExists(atPath: url(zoneID, "reference.jpg").path),
+           !views.contains(where: { $0.fileName == "reference.jpg" }) {
+            views.insert(
+                ZoneReferenceView(fileName: "reference.jpg", viewpoint: "Original view"), at: 0
+            )
+        }
+        return views
+    }
+
+    @discardableResult
+    func addReferenceView(
+        _ image: UIImage, viewpoint: String, zoneID: UUID
+    ) throws -> ZoneReferenceView {
+        try ensureDirectory(for: zoneID)
+        let view = ZoneReferenceView(
+            fileName: "reference-\(UUID().uuidString).jpg", viewpoint: viewpoint
+        )
+        guard let data = image.jpegData(compressionQuality: 0.75) else { return view }
+        try data.write(to: url(zoneID, view.fileName), options: .atomic)
+
+        var existing = readJSON([ZoneReferenceView].self, from: url(zoneID, "references.json")) ?? []
+        existing.append(view)
+        try writeJSON(existing, to: url(zoneID, "references.json"))
+        return view
+    }
+
+    func referenceViewData(_ view: ZoneReferenceView, zoneID: UUID) -> Data? {
+        try? Data(contentsOf: url(zoneID, view.fileName))
+    }
+
+    func referenceViewImage(_ view: ZoneReferenceView, zoneID: UUID) -> UIImage? {
+        UIImage(contentsOfFile: url(zoneID, view.fileName).path)
+    }
+
+    func removeReferenceView(_ view: ZoneReferenceView, zoneID: UUID) throws {
+        try? FileManager.default.removeItem(at: url(zoneID, view.fileName))
+        let remaining = (readJSON([ZoneReferenceView].self, from: url(zoneID, "references.json")) ?? [])
+            .filter { $0.id != view.id }
+        try writeJSON(remaining, to: url(zoneID, "references.json"))
+    }
+
+    /// Raw bytes of the saved world map, for publication. Returns nil rather
+    /// than throwing — a zone with no world map still publishes its graph.
+    func worldMapData(_ zoneID: UUID) -> Data? {
+        try? Data(contentsOf: url(zoneID, "worldmap.arexperience"))
     }
 
     // MARK: - Route graph (derived; safe to regenerate)

@@ -15,6 +15,9 @@ struct MapPublisher {
         var version: Int
         var nodeCount: Int
         var edgeCount: Int
+        /// Binary artifacts uploaded alongside the graph, plus the manifest.
+        var artifactCount: Int = 0
+        var hasWorldMap: Bool = false
     }
 
     enum PublishError: LocalizedError {
@@ -83,14 +86,23 @@ struct MapPublisher {
 
     // MARK: - Publish
 
-    /// Creates the building if needed, uploads the graph as a draft, then
-    /// publishes. `publish_map_version` validates and archives the old version
-    /// in one transaction, so a failure never leaves a half-published map.
+    /// Creates the building if needed, uploads the graph and every localization
+    /// artifact as a draft, then publishes. `publish_map_version` validates and
+    /// archives the old version in one transaction, and it is only reached once
+    /// all uploads have succeeded — a failure leaves a draft, never a
+    /// half-published map.
+    ///
+    /// - Parameters:
+    ///   - artifacts: ARWorldMap, reference viewpoints and floor plan bytes.
+    ///   - aliases: extra OCR-searchable strings per node stable id.
     func publish(
         zone: MappingZone,
         graph: BuildingGraph,
         organizationID: UUID,
-        existingBuildingID: UUID?
+        existingBuildingID: UUID?,
+        buildingName: String? = nil,
+        artifacts: [PendingArtifact] = [],
+        aliases: [UUID: [String]] = [:]
     ) async throws -> Result {
         try Self.validate(graph)
 
@@ -156,17 +168,67 @@ struct MapPublisher {
             try await client.from("route_edges").insert(chunk).execute()
         }
 
-        _ = try await client
-            .rpc("publish_map_version", params: ["p_map_version_id": draft.id.uuidString])
-            .execute()
+        // The localization package: manifest built locally, artifacts uploaded
+        // to Storage, rows written, and only then the version published.
+        let manifest = try MapPackageBuilder.build(
+            zone: zone,
+            graph: graph,
+            buildingID: buildingID,
+            buildingName: buildingName ?? (zone.building.isEmpty ? zone.displayTitle : zone.building),
+            mapVersionID: draft.id,
+            version: draft.version,
+            artifacts: artifacts,
+            aliases: aliases
+        )
+
+        let outcome = try await MapPackagePublisher(
+            uploader: SupabaseMapPackageUploader(client: client)
+        ).publish(manifest: manifest, artifacts: artifacts, aliases: aliases)
 
         return Result(
             buildingID: buildingID,
             mapVersionID: draft.id,
             version: draft.version,
             nodeCount: nodeRows.count,
-            edgeCount: edgeRows.count
+            edgeCount: edgeRows.count,
+            artifactCount: outcome.artifactCount,
+            hasWorldMap: manifest.zones.contains { $0.hasWorldMap }
         )
+    }
+
+    /// Collects everything on disk for a zone into upload-ready artifacts.
+    /// A zone with no world map still publishes — its graph routes fine, it
+    /// just cannot offer camera relocalization.
+    static func artifacts(for zone: MappingZone, store: ZoneFileStore) -> [PendingArtifact] {
+        var pending: [PendingArtifact] = []
+
+        if let worldMap = store.worldMapData(zone.id) {
+            pending.append(PendingArtifact(
+                kind: .worldmap,
+                zoneID: zone.id,
+                fileName: "worldmap.arexperience",
+                data: worldMap
+            ))
+        }
+
+        for view in store.referenceViews(zone.id) {
+            guard let data = store.referenceViewData(view, zoneID: zone.id) else { continue }
+            pending.append(PendingArtifact(
+                kind: .referenceImage,
+                zoneID: zone.id,
+                fileName: view.fileName,
+                viewpoint: view.viewpoint,
+                data: data
+            ))
+        }
+
+        if let floorPlan = store.loadFloorPlanImage(zone.id)?.jpegData(compressionQuality: 0.85) {
+            pending.append(PendingArtifact(
+                kind: .floorplan, zoneID: zone.id, fileName: "floorplan.jpg", data: floorPlan
+            ))
+        }
+
+        return pending
     }
 }
 
