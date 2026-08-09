@@ -150,6 +150,44 @@ enum FocusOverlayBuilder {
         )
     }
 
+    /// Shell fallback for buildings with no cached OSM footprint: the convex
+    /// hull of every node in the graph, padded 2m outward. Mirrors the
+    /// dashboard's last-resort fallback (`focus.tsx`'s `convex`+`buffer`
+    /// path) rather than inventing new behaviour — same limitation too: a
+    /// graph with fewer than 3 non-collinear nodes can't form a hull, and
+    /// gets no shell here either.
+    static func shellFallback(graph: BuildingGraph, anchor: BuildingAnchor, floorCount: Int) -> [[Double]]? {
+        let points = graph.nodes.map { coordinate($0, anchor) }
+        let hull = convexHull(points)
+        guard hull.count >= 3 else { return nil }
+        let padded = padded(hull, byMeters: 2)
+        var coords = padded.map { [$0.longitude, $0.latitude] }
+        if let first = coords.first { coords.append(first) }
+        return coords
+    }
+
+    /// Pushes each hull vertex outward from the centroid by `meters`,
+    /// converted per-axis the same way `ribbon` does.
+    private static func padded(_ ring: [CLLocationCoordinate2D], byMeters meters: Double) -> [CLLocationCoordinate2D] {
+        guard !ring.isEmpty else { return ring }
+        let centroidLat = ring.map(\.latitude).reduce(0, +) / Double(ring.count)
+        let centroidLng = ring.map(\.longitude).reduce(0, +) / Double(ring.count)
+        let latScale = LocalGeo.metersPerDegreeLat
+        let lngScale = LocalGeo.metersPerDegreeLat * cos(centroidLat * .pi / 180)
+        return ring.map { p in
+            let dxM = (p.longitude - centroidLng) * lngScale
+            let dyM = (p.latitude - centroidLat) * latScale
+            let length = (dxM * dxM + dyM * dyM).squareRoot()
+            guard length > 0 else { return p }
+            let scale = (length + meters) / length
+            let nxM = dxM * scale, nyM = dyM * scale
+            return CLLocationCoordinate2D(
+                latitude: centroidLat + nyM / latScale,
+                longitude: centroidLng + nxM / lngScale
+            )
+        }
+    }
+
     // MARK: - Geometry helpers
 
     private static func coordinate(_ node: RouteNode, _ anchor: BuildingAnchor) -> CLLocationCoordinate2D {

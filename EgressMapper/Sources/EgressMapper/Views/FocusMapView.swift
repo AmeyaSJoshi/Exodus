@@ -84,17 +84,29 @@ struct FocusMapLoader: View {
     let building: RemoteBuilding
 
     @State private var graph: BuildingGraph?
+    @State private var loadError: String?
 
     var body: some View {
-        FocusMapView(building: building, graph: graph)
-            .task {
-                guard graph == nil else { return }
+        Group {
+            if let loadError {
+                ContentUnavailableView("Could not load the map", systemImage: "exclamationmark.triangle", description: Text(loadError))
+            } else {
+                FocusMapView(building: building, graph: graph)
+            }
+        }
+        .task {
+            guard graph == nil, loadError == nil else { return }
+            do {
                 // The loaded graph comes from this call, not from the service's
                 // shared `graph`: that single slot is overwritten by whichever
                 // load finishes last, so reading it back can hand this screen
                 // another building's map.
-                graph = try? await session.service.loadGraph(for: building)
+                graph = try await session.service.loadGraph(for: building)
+            } catch {
+                loadError = error.localizedDescription
+                DiagnosticsLog.shared.log("Focus map: loadGraph failed for \(building.name): \(error)")
             }
+        }
     }
 }
 
@@ -115,11 +127,24 @@ private struct FocusMapRepresentable: UIViewRepresentable {
 
     /// Matches the dashboard: OpenFreeMap's Liberty style, no key required.
     private static let styleURL = URL(string: "https://tiles.openfreemap.org/styles/liberty")!
-    /// Metres from the camera to the anchor. The dashboard frames the building
-    /// at zoom 18.5; an explicit altitude is the equivalent on iOS, where
-    /// `MLNMapCamera` is expressed in distance rather than zoom.
-    private static let cameraDistanceM: CLLocationDistance = 250
+    /// The dashboard frames every building at this zoom level regardless of
+    /// its footprint size. `MLNMapCamera` takes an altitude in metres rather
+    /// than a zoom level, and a fixed altitude does not correspond to a fixed
+    /// zoom across latitudes — it previously produced a much wider frame than
+    /// the dashboard's, which is what made a shell look oversized relative to
+    /// its surroundings. Deriving altitude from `setCenter(zoomLevel:)` keeps
+    /// the two surfaces visually identical.
+    private static let matchingZoom: Double = 18.5
     private static let pitch: CGFloat = 60
+
+    /// The camera the dashboard would show for this center/heading, computed
+    /// by asking `mapView` what altitude its zoom-based API resolves to.
+    private static func framedCamera(
+        on mapView: MLNMapView, center: CLLocationCoordinate2D, heading: CLLocationDirection
+    ) -> MLNMapCamera {
+        mapView.setCenter(center, zoomLevel: matchingZoom, animated: false)
+        return MLNMapCamera(lookingAtCenter: center, altitude: mapView.camera.altitude, pitch: pitch, heading: heading)
+    }
 
     func makeUIView(context: Context) -> MLNMapView {
         let mapView = MLNMapView(frame: .zero, styleURL: Self.styleURL)
@@ -136,15 +161,7 @@ private struct FocusMapRepresentable: UIViewRepresentable {
         mapView.delegate = context.coordinator
 
         let center = CLLocationCoordinate2D(latitude: anchor.latitude, longitude: anchor.longitude)
-        mapView.setCamera(
-            MLNMapCamera(
-                lookingAtCenter: center,
-                altitude: Self.cameraDistanceM,
-                pitch: Self.pitch,
-                heading: anchor.headingDeg
-            ),
-            animated: false
-        )
+        mapView.setCamera(Self.framedCamera(on: mapView, center: center, heading: anchor.headingDeg), animated: false)
         return mapView
     }
 
@@ -171,15 +188,8 @@ private struct FocusMapRepresentable: UIViewRepresentable {
         // SwiftUI update.
         guard coordinator.appliedAnchor != anchor else { return }
         coordinator.appliedAnchor = anchor
-        mapView.setCamera(
-            MLNMapCamera(
-                lookingAtCenter: CLLocationCoordinate2D(latitude: anchor.latitude, longitude: anchor.longitude),
-                altitude: Self.cameraDistanceM,
-                pitch: Self.pitch,
-                heading: anchor.headingDeg
-            ),
-            animated: true
-        )
+        let center = CLLocationCoordinate2D(latitude: anchor.latitude, longitude: anchor.longitude)
+        mapView.setCamera(Self.framedCamera(on: mapView, center: center, heading: anchor.headingDeg), animated: true)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -222,15 +232,9 @@ private struct FocusMapRepresentable: UIViewRepresentable {
             // The camera set at construction is discarded when the style
             // finishes loading, leaving the map at world zoom — so frame the
             // anchor again now that there is a style to frame it against.
+            let center = CLLocationCoordinate2D(latitude: anchor.latitude, longitude: anchor.longitude)
             mapView.setCamera(
-                MLNMapCamera(
-                    lookingAtCenter: CLLocationCoordinate2D(
-                        latitude: anchor.latitude, longitude: anchor.longitude
-                    ),
-                    altitude: 250,
-                    pitch: 60,
-                    heading: anchor.headingDeg
-                ),
+                FocusMapRepresentable.framedCamera(on: mapView, center: center, heading: anchor.headingDeg),
                 animated: false
             )
             muteBaseStyle(style)
@@ -269,7 +273,6 @@ private struct FocusMapRepresentable: UIViewRepresentable {
         func applyOverlays(to style: MLNStyle) {
             applyShell(to: style)
             guard let graph else { return }
-
             let floors = FocusOverlayBuilder.floors(in: graph)
             // Ghosting is done with a predicate pair rather than a data-driven
             // opacity expression: MapLibre Native's NSExpression dialect
@@ -420,12 +423,30 @@ private struct FocusMapRepresentable: UIViewRepresentable {
             let fillID = prefix + "shell-fill"
             let outlineID = prefix + "shell-outline"
 
-            guard let footprint else { return }
-            let height = footprintHeightM ?? 3
+            let height: Double
+            let data: Data
+            if let footprint, let footprintData = try? footprint.featureData() {
+                height = footprintHeightM ?? 3
+                data = footprintData
+            } else if let graph, let ring = FocusOverlayBuilder.shellFallback(
+                graph: graph, anchor: anchor, floorCount: FocusOverlayBuilder.floors(in: graph).count
+            ) {
+                height = Double(max(1, FocusOverlayBuilder.floors(in: graph).count)) * FocusOverlayBuilder.floorHeightM
+                let feature: [String: Any] = [
+                    "type": "Feature", "properties": [:],
+                    "geometry": ["type": "Polygon", "coordinates": [ring]],
+                ]
+                guard let d = try? JSONSerialization.data(withJSONObject: feature) else { return }
+                data = d
+            } else {
+                // No cached footprint and not enough nodes to hull one — same
+                // dead end the dashboard hits in this case.
+                return
+            }
 
             let shape: MLNShape
             do {
-                shape = try MLNShape(data: footprint.featureData(), encoding: String.Encoding.utf8.rawValue)
+                shape = try MLNShape(data: data, encoding: String.Encoding.utf8.rawValue)
             } catch {
                 return
             }
