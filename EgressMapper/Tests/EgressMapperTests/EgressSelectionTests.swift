@@ -132,7 +132,11 @@ final class AutomaticExitSelectionTests: XCTestCase {
 
         XCTAssertThrowsError(
             try ShortestPathService.findBestEgressRoute(from: b.start, graph: b.graph, profile: .standard)
-        ) { XCTAssertEqual($0 as? RoutingError, .noRoute) }
+        ) {
+            // Removing every exit is a map problem, not a blockage — the
+            // message must say so rather than blaming a closure.
+            XCTAssertEqual($0 as? RoutingError, .noExitsOnMap)
+        }
     }
 
     func testWorksFromAMidHallwayPosition() throws {

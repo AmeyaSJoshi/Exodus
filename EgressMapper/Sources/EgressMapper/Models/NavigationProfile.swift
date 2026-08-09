@@ -154,6 +154,13 @@ enum RoutingError: LocalizedError, Equatable {
     case noRoute
     case noAccessibleRoute(constraints: String)
     case emptyGraph
+    /// The map has no exit waypoint at all, so there is nothing to route to.
+    case noExitsOnMap
+    /// A route exists on the map, but live closures cut every one of them.
+    case allRoutesBlocked(blockedSegments: Int)
+    /// The start point has no connection to any exit even with nothing
+    /// blocked — the map itself is missing a link.
+    case startNotConnected(startName: String)
 
     var errorDescription: String? {
         switch self {
@@ -162,7 +169,15 @@ enum RoutingError: LocalizedError, Equatable {
         case .unknownDestination:
             return "That destination is not part of this zone's map."
         case .noRoute:
-            return "No route to an exit is available from here. Every path is blocked."
+            return "No route to an exit is available from here."
+        case .noExitsOnMap:
+            return "This map has no exit marked on it, so there is nothing to route to. Add an exit waypoint and publish again."
+        case .allRoutesBlocked(let count):
+            return count == 1
+                ? "The only way out from here is currently blocked by an administrator."
+                : "All \(count) routes out from here are currently blocked by an administrator."
+        case .startNotConnected(let startName):
+            return "“\(startName)” is not connected to any exit on this map — nothing is blocked, the map is missing a link. Re-map the zone so this point joins a corridor that reaches an exit."
         case .noAccessibleRoute(let constraints):
             return "No route matching your accessibility needs (\(constraints)) is available. All remaining paths are excluded."
         case .emptyGraph:

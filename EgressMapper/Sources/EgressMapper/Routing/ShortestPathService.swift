@@ -113,9 +113,7 @@ enum ShortestPathService {
         }
 
         guard !routes.isEmpty else {
-            throw profile.hasAccessibilityConstraints
-                ? RoutingError.noAccessibleRoute(constraints: profile.constraintSummary ?? "")
-                : RoutingError.noRoute
+            throw diagnoseFailure(from: start, graph: graph, profile: profile)
         }
 
         routes.sort { $0.totalDistanceMeters < $1.totalDistanceMeters }
@@ -124,6 +122,64 @@ enum ShortestPathService {
             alternatives: Array(routes.dropFirst()),
             unreachable: unreachable
         )
+    }
+
+    // MARK: - Why there is no route
+
+    /// Works out the *actual* reason no exit could be reached.
+    ///
+    /// Telling someone "every path is blocked" when nothing is blocked sends
+    /// them looking for a fire that is not there, and hides the real problem —
+    /// usually a map whose waypoints form one unbranched chain, where a single
+    /// closure severs the building in two. So the search is re-run with the
+    /// live closures lifted: if a route appears, the closures really are the
+    /// cause; if it still fails, the map never had a link in the first place.
+    static func diagnoseFailure(
+        from start: RoutePosition,
+        graph: BuildingGraph,
+        profile: NavigationProfile
+    ) -> RoutingError {
+        let targets = graph.exits.isEmpty ? graph.refuges : graph.exits
+        guard !targets.isEmpty else { return .noExitsOnMap }
+
+        func canReach(_ candidate: BuildingGraph, _ using: NavigationProfile) -> Bool {
+            targets.contains { target in
+                (try? findRoute(from: start, to: target.id, graph: candidate, profile: using)) != nil
+            }
+        }
+
+        // Accessibility comes first. If someone else could walk out of this
+        // building right now, the binding reason is the user's own constraint,
+        // not a closure — telling a wheelchair user "an administrator blocked
+        // everything" when the remaining route is merely stairs is a lie.
+        if profile.hasAccessibilityConstraints, canReach(graph, .standard) {
+            return .noAccessibleRoute(constraints: profile.constraintSummary ?? "")
+        }
+
+        // The same graph with every closure and hazard lifted.
+        var unblocked = graph
+        unblocked.edges = graph.edges.map {
+            var edge = $0
+            edge.isBlocked = false
+            edge.hazard = nil
+            return edge
+        }
+
+        if canReach(unblocked, profile) {
+            // Lifting the closures restores a route, so the closures really
+            // are the cause.
+            let blocked = graph.edges.filter(\.isImpassable).count
+            return .allRoutesBlocked(blockedSegments: max(blocked, 1))
+        }
+
+        if profile.hasAccessibilityConstraints, canReach(unblocked, .standard) {
+            return .noAccessibleRoute(constraints: profile.constraintSummary ?? "")
+        }
+
+        // Nothing is blocked and no constraint is at fault: the map itself
+        // never linked this point to an exit.
+        let startName = (start.nodeID.flatMap { graph.node($0) })?.name ?? "Your location"
+        return .startNotConnected(startName: startName)
     }
 
     // MARK: - Start resolution

@@ -294,7 +294,9 @@ final class ShortestPathServiceTests: XCTestCase {
         XCTAssertThrowsError(
             try ShortestPathService.findBestEgressRoute(from: f.start(), graph: f.graph, profile: .standard)
         ) { error in
-            XCTAssertEqual(error as? RoutingError, .noRoute)
+            guard case RoutingError.allRoutesBlocked = error else {
+                return XCTFail("expected allRoutesBlocked, got \(error)")
+            }
         }
     }
 
