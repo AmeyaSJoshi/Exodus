@@ -57,6 +57,26 @@ struct LiveStateCache {
         return try? Self.decoder.decode(BuildingStateSnapshot.self, from: data)
     }
 
+    // MARK: - Downloaded map version
+
+    private var versionsURL: URL { root.appendingPathComponent("versions.json") }
+
+    func loadVersions() -> [UUID: Int] {
+        guard let data = try? Data(contentsOf: versionsURL),
+              let raw = try? Self.decoder.decode([String: Int].self, from: data) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: raw.compactMap { key, value in
+            UUID(uuidString: key).map { ($0, value) }
+        })
+    }
+
+    func saveVersion(_ version: Int, buildingID: UUID) {
+        var all = loadVersions()
+        all[buildingID] = version
+        let raw = Dictionary(uniqueKeysWithValues: all.map { ($0.key.uuidString, $0.value) })
+        guard let data = try? Self.encoder.encode(raw) else { return }
+        try? data.write(to: versionsURL, options: .atomic)
+    }
+
     func clear(buildingID: UUID) {
         try? FileManager.default.removeItem(at: url(buildingID, "graph.json"))
         try? FileManager.default.removeItem(at: url(buildingID, "state.json"))

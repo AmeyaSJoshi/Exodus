@@ -152,5 +152,5 @@ begin
     -- Published directly: publish_map_version() requires an authenticated admin,
     -- which a seed script does not have.
     update public.map_versions set status = 'published', published_at = now() where id = mapv;
-    update public.buildings set active_map_version_id = mapv where id = bldg;
+    update public.buildings set active_map_version_id = mapv, status = 'published' where id = bldg;
 end $$;

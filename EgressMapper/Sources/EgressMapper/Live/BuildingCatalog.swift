@@ -1,0 +1,174 @@
+import Foundation
+
+/// The authenticated user's role and organization, read from their profile.
+/// The client never supplies an organization id — the server resolves it.
+struct UserProfile: Codable, Hashable {
+    var userID: UUID?
+    var organizationID: UUID?
+    var organizationName: String?
+    var role: String?
+    var displayName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case organizationID = "organization_id"
+        case organizationName = "organization_name"
+        case role, displayName = "display_name"
+    }
+
+    /// Mappers and administrators share one role today.
+    var canManageBuildings: Bool { role == "admin" }
+    var hasOrganization: Bool { organizationID != nil }
+
+    static let empty = UserProfile()
+}
+
+/// A building as the organization sees it, before any local state is merged.
+struct CatalogBuilding: Codable, Hashable, Identifiable {
+    var id: UUID
+    var name: String
+    var address: String?
+    var description: String?
+    var status: String
+    var activeMapVersionID: UUID?
+    var version: Int?
+    /// Kept as the raw ISO string: PostgREST sends a timestamp, and the default
+    /// JSONDecoder date strategy would reject it and fail the whole catalogue.
+    var publishedAt: String?
+    var nodeCount: Int
+    var artifactCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, address, description, status
+        case activeMapVersionID = "active_map_version_id"
+        case version
+        case publishedAt = "published_at"
+        case nodeCount = "node_count"
+        case artifactCount = "artifact_count"
+    }
+
+    var isPublished: Bool { status == "published" }
+}
+
+/// How a building stands on *this* device.
+enum BuildingAvailability: Equatable, Hashable {
+    case localDraft
+    case publishedByYou
+    case downloadRequired
+    case downloading
+    case offlineAvailable
+    case updateAvailable(cached: Int, latest: Int)
+    case downloadFailed(String)
+
+    var label: String {
+        switch self {
+        case .localDraft: return "Local Draft"
+        case .publishedByYou: return "Published by You"
+        case .downloadRequired: return "Download Required"
+        case .downloading: return "Downloading…"
+        case .offlineAvailable: return "Offline Available"
+        case .updateAvailable(let cached, let latest): return "Update Available (v\(cached) → v\(latest))"
+        case .downloadFailed(let reason): return "Download Failed — \(reason)"
+        }
+    }
+
+    /// Only these can start an evacuation without a network round trip.
+    var isUsableOffline: Bool {
+        switch self {
+        case .offlineAvailable, .updateAvailable, .publishedByYou: return true
+        default: return false
+        }
+    }
+}
+
+/// One row in the unified Saved Maps list: a remote building, a local zone, or
+/// both once a zone has been published.
+struct BuildingEntry: Identifiable, Hashable {
+    var id: UUID
+    var name: String
+    var subtitle: String
+    var remote: CatalogBuilding?
+    var localZone: MappingZone?
+    var availability: BuildingAvailability
+
+    var isRemote: Bool { remote != nil }
+    var isLocalOnly: Bool { remote == nil && localZone != nil }
+}
+
+/// Merges the organization catalogue with locally saved zones and the download
+/// cache. Pure so the merge rules are unit tested without a network.
+enum BuildingCatalogMerger {
+
+    /// A local zone and a remote building are the same thing when the zone
+    /// records the remote id it was published to.
+    static func merge(
+        remote: [CatalogBuilding],
+        localZones: [MappingZone],
+        cachedVersion: (UUID) -> Int?,
+        profile: UserProfile
+    ) -> [BuildingEntry] {
+        var entries: [BuildingEntry] = []
+        var claimedZoneIDs: Set<UUID> = []
+
+        for building in remote {
+            let zone = localZones.first { $0.remoteBuildingID == building.id }
+            if let zone { claimedZoneIDs.insert(zone.id) }
+
+            entries.append(
+                BuildingEntry(
+                    id: building.id,
+                    name: building.name,
+                    subtitle: subtitle(for: building),
+                    remote: building,
+                    localZone: zone,
+                    availability: availability(
+                        for: building,
+                        hasLocalZone: zone != nil,
+                        cached: cachedVersion(building.id),
+                        profile: profile
+                    )
+                )
+            )
+        }
+
+        // Zones that were never published stay visible to their mapper only.
+        if profile.canManageBuildings {
+            for zone in localZones where !claimedZoneIDs.contains(zone.id) {
+                entries.append(
+                    BuildingEntry(
+                        id: zone.id,
+                        name: zone.displayTitle,
+                        subtitle: zone.displaySubtitle,
+                        remote: nil,
+                        localZone: zone,
+                        availability: .localDraft
+                    )
+                )
+            }
+        }
+
+        return entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    static func subtitle(for building: CatalogBuilding) -> String {
+        var parts: [String] = []
+        if let address = building.address, !address.isEmpty { parts.append(address) }
+        if let version = building.version { parts.append("v\(version)") }
+        parts.append("\(building.nodeCount) nodes")
+        return parts.joined(separator: " · ")
+    }
+
+    static func availability(
+        for building: CatalogBuilding,
+        hasLocalZone: Bool,
+        cached: Int?,
+        profile: UserProfile
+    ) -> BuildingAvailability {
+        guard let latest = building.version else { return .downloadRequired }
+        guard let cached else {
+            return hasLocalZone && profile.canManageBuildings ? .publishedByYou : .downloadRequired
+        }
+        if cached < latest { return .updateAvailable(cached: cached, latest: latest) }
+        return hasLocalZone && profile.canManageBuildings ? .publishedByYou : .offlineAvailable
+    }
+}

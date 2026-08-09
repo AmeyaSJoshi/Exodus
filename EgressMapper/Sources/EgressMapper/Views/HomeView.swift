@@ -5,6 +5,7 @@ import ARKit
 /// get out, and a Configure path for the administrator tooling.
 struct HomeView: View {
     @Environment(ZoneRepository.self) private var repository
+    @Environment(BackendSession.self) private var session
     @State private var showEmergency = false
     @State private var showConfigure = false
     @State private var showSavedZones = false
@@ -26,7 +27,7 @@ struct HomeView: View {
             .background(Color.black.ignoresSafeArea())
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(isPresented: $showEmergency) {
-                EmergencyZoneSelectView()
+                EmergencyBuildingListView(session: session)
             }
             .navigationDestination(isPresented: $showConfigure) {
                 ConfigureView()
@@ -82,15 +83,7 @@ struct HomeView: View {
             .background(Color.red, in: RoundedRectangle(cornerRadius: 20))
             .foregroundStyle(.white)
         }
-        .disabled(repository.zones.isEmpty)
-        .overlay(alignment: .bottom) {
-            if repository.zones.isEmpty {
-                Text("Map a zone in Configure first")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.bottom, -18)
-            }
-        }
+
     }
 
     private var secondaryActions: some View {
@@ -132,6 +125,7 @@ struct HomeView: View {
 /// from the original flow; it now lives behind this screen.
 struct ConfigureView: View {
     @Environment(ZoneRepository.self) private var repository
+    @Environment(BackendSession.self) private var session
     @State private var showCreateZone = false
     @State private var showSavedZones = false
     @State private var profile = NavigationProfile.standard
@@ -154,10 +148,22 @@ struct ConfigureView: View {
                 } label: {
                     Label("Active Hazards", systemImage: "exclamationmark.triangle")
                 }
+
+            }
+
+            Section("Organization") {
+                NavigationLink {
+                    BuildingsView(session: session)
+                } label: {
+                    Label("Buildings", systemImage: "building.2")
+                }
+            }
+
+            Section("Developer Tools") {
                 NavigationLink {
                     LiveDemoView()
                 } label: {
-                    Label("Live Backend Demo", systemImage: "antenna.radiowaves.left.and.right")
+                    Label("Live Backend Diagnostics", systemImage: "stethoscope")
                 }
             }
 
