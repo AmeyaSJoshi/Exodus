@@ -23,7 +23,10 @@ struct MappingView: View {
             VStack(spacing: 10) {
                 statusOverlay
                 if let sign = manager.lastRecognizedSign { ocrSuggestion(sign) }
-                if showMap { mapOverlay }
+                // Hidden, not merely covered: leaving it mounted meant the
+                // whole recorded path was re-drawn behind the sheet on every
+                // pose update while the user was typing.
+                if showMap && pendingType == nil { mapOverlay }
                 CameraDebugIndicator(manager: manager)
                 HeightControlView(manager: manager)
                 DebugOverlayView(manager: manager)
@@ -47,9 +50,14 @@ struct MappingView: View {
             .presentationDetents([.height(280)])
             .onAppear {
                 Startup.firstUse("room-editor")
+                // The AR session keeps running and recording; only the SwiftUI
+                // updates behind the sheet stop, so the text field gets the
+                // main thread to itself.
+                manager.isUIPaused = true
                 DiagnosticsLog.shared.log("Room editor presented over \(manager.shortID)")
             }
             .onDisappear {
+                manager.isUIPaused = false
                 // The moment the freeze is reported. What the manager logs
                 // straight after this line says whether the session stopped or
                 // only the renderer did.
