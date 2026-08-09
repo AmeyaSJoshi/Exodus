@@ -12,11 +12,44 @@ enum FocusOverlayBuilder {
     static let slabThicknessM: Double = 0.15
     static let roomHalfWidthM: Double = 1.2
     static let routeBufferM: Double = 0.35
-    /// Every distinct floor in the graph, ordered. Matches the dashboard, which
-    /// derives floor order by sorting the `floor_id` labels rather than reading
-    /// `floors.level` — that column is never populated by the seed data.
+    /// Every distinct floor in the graph, in building order.
+    ///
+    /// Floor order has to come from the `floor_id` labels: `floors.level` is
+    /// the column that means "which storey", but nothing populates it and
+    /// neither surface queries that table. A plain string sort puts
+    /// `floor-10` below `floor-2`, so the numeric part of the label is
+    /// compared as a number, falling back to a lexical compare for labels
+    /// that carry no digits.
     static func floors(in graph: BuildingGraph) -> [String] {
-        Array(Set(graph.nodes.map(\.floorID))).sorted()
+        Array(Set(graph.nodes.map(\.floorID))).sorted(by: floorPrecedes)
+    }
+
+    /// True when `a` sits below `b`.
+    static func floorPrecedes(_ a: String, _ b: String) -> Bool {
+        switch (level(of: a), level(of: b)) {
+        case let (x?, y?) where x != y: return x < y
+        case (nil, _?): return false // Unnumbered labels sort after numbered ones.
+        case (_?, nil): return true
+        default: return a < b
+        }
+    }
+
+    /// The first run of digits in a floor label — `"floor-10"` is storey 10,
+    /// `"B2"` is 2. Signed prefixes are honoured so `"-1"` reads as a basement.
+    static func level(of floorID: String) -> Int? {
+        // Only a leading sign is a sign — the hyphen in "floor-10" is a
+        // separator, not a minus.
+        let negative = floorID.hasPrefix("-")
+        var digits = ""
+        for ch in floorID {
+            if ch.isNumber {
+                digits.append(ch)
+            } else if !digits.isEmpty {
+                break
+            }
+        }
+        guard let value = Int(digits) else { return nil }
+        return negative ? -value : value
     }
 
     static func floorIndex(_ floorID: String, in floors: [String]) -> Int {
