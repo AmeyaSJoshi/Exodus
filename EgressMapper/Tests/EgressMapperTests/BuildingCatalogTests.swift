@@ -32,11 +32,20 @@ final class BuildingCatalogMergeTests: XCTestCase {
         XCTAssertEqual(entries[0].availability, .downloadRequired)
     }
 
-    func testStudentDoesNotSeeSomebodyElsesLocalDrafts() {
+    /// The premise behind the old version of this test was wrong. Local zones
+    /// come from this device's own store — they are never somebody else's, so
+    /// there is nothing to protect a student from. Filtering them by role only
+    /// hid the student's own recording and made a good save look like a failure.
+    func testStudentSeesTheLocalDraftsRecordedOnThisDevice() {
         let entries = BuildingCatalogMerger.merge(
             remote: [], localZones: [makeZone("Unpublished")], cachedVersion: { _ in nil }, profile: student()
         )
-        XCTAssertTrue(entries.isEmpty, "A student must not see local drafts")
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries[0].availability, .localDraft)
+        XCTAssertFalse(
+            entries[0].actions(for: student()).contains(.attachToBuilding),
+            "seeing it is not the same as being allowed to publish it"
+        )
     }
 
     func testAdminSeesLocalDraftsAsWell() {
