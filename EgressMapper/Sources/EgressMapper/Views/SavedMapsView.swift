@@ -122,7 +122,7 @@ struct SavedMapsView: View {
         .sheet(item: $detailEntry) { entry in
             PublicationStateView(entry: entry, cached: session.cachedPackage(for: entry.id))
         }
-        .alert("Delete Local Map?", isPresented: .constant(pendingDelete != nil)) {
+        .alert("Delete Local Map?", isPresented: .presenting($pendingDelete)) {
             Button("Cancel", role: .cancel) { pendingDelete = nil }
             Button("Delete", role: .destructive) {
                 if let pendingDelete { Task { await repository.delete(pendingDelete) } }
@@ -131,7 +131,7 @@ struct SavedMapsView: View {
         } message: {
             Text("This removes the world map, waypoints and recorded path stored on this device for “\(pendingDelete?.displayTitle ?? "")”. Anything already published stays published.")
         }
-        .alert("Delete Building?", isPresented: .constant(pendingBuildingDelete != nil)) {
+        .alert("Delete Building?", isPresented: .presenting($pendingBuildingDelete)) {
             Button("Cancel", role: .cancel) { pendingBuildingDelete = nil }
             Button("Delete for Everyone", role: .destructive) {
                 if let building = pendingBuildingDelete {
@@ -146,7 +146,7 @@ struct SavedMapsView: View {
         } message: {
             Text("This permanently removes “\(pendingBuildingDelete?.name ?? "")”, every published version of its map and its live closures, for everyone in your organization. Occupants will no longer see it. Local recordings on this device are kept.")
         }
-        .alert("Rename Map", isPresented: .constant(renaming != nil)) {
+        .alert("Rename Map", isPresented: .presenting($renaming)) {
             TextField("Name", text: $renameText)
             Button("Cancel", role: .cancel) { renaming = nil }
             Button("Save") {

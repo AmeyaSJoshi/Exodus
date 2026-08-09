@@ -366,28 +366,27 @@ struct AttachMapView: View {
 
                 if let zone = selected, let graph = repository.graph(for: zone) {
                     Section("Localization package") {
-                        let artifacts = MapPublisher.artifacts(for: zone, store: repository.store)
-                        let worldMaps = artifacts.filter { $0.kind == .worldmap }
-                        let views = artifacts.filter { $0.kind == .referenceImage }
-                        LabeledContent("AR world map", value: worldMaps.isEmpty ? "None" : "Included")
-                        LabeledContent("Reference views", value: "\(views.count)")
+                        // Sizes, not contents: reading the world map here meant
+                        // loading well over a megabyte on every re-render.
+                        let summary = MapPublisher.artifactSummary(for: zone, store: repository.store)
+                        LabeledContent("AR world map", value: summary.hasWorldMap ? "Included" : "None")
+                        LabeledContent("Reference views", value: "\(summary.referenceViewCount)")
                         LabeledContent(
                             "Upload size",
                             value: ByteCountFormatter.string(
-                                fromByteCount: Int64(artifacts.reduce(0) { $0 + $1.data.count }),
-                                countStyle: .file
+                                fromByteCount: Int64(summary.totalBytes), countStyle: .file
                             )
                         )
-                        if worldMaps.isEmpty {
+                        if !summary.hasWorldMap {
                             Label(
                                 "No saved AR world map. The route will publish and work, but occupants cannot use camera relocalization in this building.",
                                 systemImage: "exclamationmark.triangle.fill"
                             )
                             .font(.caption2).foregroundStyle(.orange)
                         }
-                        if views.count < 2 {
+                        if summary.referenceViewCount < 2 {
                             Label(
-                                "Only \(views.count) reference view. Add photos from other directions so relocalization works from more than one spot.",
+                                "Only \(summary.referenceViewCount) reference view. Add photos from other directions so relocalization works from more than one spot.",
                                 systemImage: "camera.viewfinder"
                             )
                             .font(.caption2).foregroundStyle(.secondary)

@@ -44,7 +44,7 @@ struct FloorPlanAlignmentView: View {
                         .disabled(alignment == nil)
                 }
             }
-            .alert("Floor Plan", isPresented: .constant(errorMessage != nil)) {
+            .alert("Floor Plan", isPresented: .presenting($errorMessage)) {
                 Button("OK") { errorMessage = nil }
             } message: {
                 Text(errorMessage ?? "")

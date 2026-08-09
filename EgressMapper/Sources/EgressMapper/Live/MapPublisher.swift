@@ -196,6 +196,42 @@ struct MapPublisher {
         )
     }
 
+    /// What a zone would upload, without reading a byte of it.
+    ///
+    /// `artifacts(for:store:)` loads every file into memory — a world map alone
+    /// is well over a megabyte. Calling it from a view body re-read all of it
+    /// on every re-render, which is why the publish screen crawled. Views want
+    /// counts and a total size, so those come from file attributes instead.
+    struct ArtifactSummary: Equatable {
+        var hasWorldMap = false
+        var referenceViewCount = 0
+        var hasFloorPlan = false
+        var totalBytes: Int = 0
+    }
+
+    static func artifactSummary(for zone: MappingZone, store: ZoneFileStore) -> ArtifactSummary {
+        let fm = FileManager.default
+        func size(_ url: URL) -> Int? {
+            (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int) ?? nil
+        }
+
+        var summary = ArtifactSummary()
+        if let bytes = size(store.url(zone.id, "worldmap.arexperience")) {
+            summary.hasWorldMap = true
+            summary.totalBytes += bytes
+        }
+        for view in store.referenceViews(zone.id) {
+            guard let bytes = size(store.url(zone.id, view.fileName)) else { continue }
+            summary.referenceViewCount += 1
+            summary.totalBytes += bytes
+        }
+        if let bytes = size(store.url(zone.id, "floorplan.jpg")) {
+            summary.hasFloorPlan = true
+            summary.totalBytes += bytes
+        }
+        return summary
+    }
+
     /// Collects everything on disk for a zone into upload-ready artifacts.
     /// A zone with no world map still publishes — its graph routes fine, it
     /// just cannot offer camera relocalization.

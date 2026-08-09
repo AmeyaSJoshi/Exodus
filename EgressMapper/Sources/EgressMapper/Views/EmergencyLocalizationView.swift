@@ -62,7 +62,7 @@ struct EmergencyLocalizationView: View {
                 }
             }
         }
-        .alert("Emergency Mode", isPresented: .constant(errorMessage != nil)) {
+        .alert("Emergency Mode", isPresented: .presenting($errorMessage)) {
             Button("Scan a Room Sign") { errorMessage = nil; showScanSign = true }
             Button("Choose Manually") { errorMessage = nil; showManualPicker = true }
             Button("Back", role: .cancel) { errorMessage = nil; stop(); onCancel() }
