@@ -154,6 +154,11 @@ struct ConfigureView: View {
                 } label: {
                     Label("Active Hazards", systemImage: "exclamationmark.triangle")
                 }
+                NavigationLink {
+                    LiveDemoView()
+                } label: {
+                    Label("Live Backend Demo", systemImage: "antenna.radiowaves.left.and.right")
+                }
             }
 
             Section {
