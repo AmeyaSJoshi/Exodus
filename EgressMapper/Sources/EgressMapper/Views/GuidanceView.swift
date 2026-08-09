@@ -16,6 +16,11 @@ struct GuidanceView: View {
     var rerouteContext: RerouteContext?
     /// Set when this zone is published, so administrator blocks reach AR.
     var liveService: SupabaseBuildingService?
+    /// Explicit ARWorldMap bytes for callers whose map does not live in the
+    /// local zone store — a downloaded building keeps its world map in the
+    /// package cache, not under `Zones/<id>/`. Nil means "look in the store",
+    /// which is what the mapper's own local flow wants.
+    var worldMapData: Data?
     var onExit: () -> Void
 
     /// Everything needed to recompute a route without leaving navigation.
@@ -53,8 +58,10 @@ struct GuidanceView: View {
         routeEdges: [RouteEdge] = [],
         rerouteContext: RerouteContext? = nil,
         liveService: SupabaseBuildingService? = nil,
+        worldMapData: Data? = nil,
         onExit: @escaping () -> Void
     ) {
+        self.worldMapData = worldMapData
         self.zone = zone
         self.route = route
         self.path = path
@@ -455,11 +462,30 @@ struct GuidanceView: View {
         announcer.configureAudioSession()
         referenceImage = repository.store.loadReferenceImage(zone.id)
         do {
-            let map = try repository.store.loadWorldMap(zone.id)
+            let map = try loadWorldMap()
             try manager.startRelocalizing(zone: zone, worldMap: map, waypoints: allWaypoints, path: path)
         } catch {
             errorMessage = error.localizedDescription
+            DiagnosticsLog.shared.log("Guidance world map unavailable: \(error.localizedDescription)")
         }
+    }
+
+    /// Supplied bytes win. A downloaded building's world map lives in the
+    /// package cache, so looking only in the local zone store reported
+    /// "no saved world map" for a map that was present all along.
+    private func loadWorldMap() throws -> ARWorldMap {
+        if let worldMapData {
+            guard let map = try NSKeyedUnarchiver.unarchivedObject(
+                ofClass: ARWorldMap.self, from: worldMapData
+            ) else { throw ZoneStoreError.worldMapUnarchiveFailed }
+            DiagnosticsLog.shared.log(
+                "Guidance decoded supplied world map (\(worldMapData.count) bytes)"
+            )
+            return map
+        }
+        let map = try repository.store.loadWorldMap(zone.id)
+        DiagnosticsLog.shared.log("Guidance decoded world map from the local zone store")
+        return map
     }
 
     private func restart() {

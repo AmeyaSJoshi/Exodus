@@ -82,6 +82,43 @@ struct MapPackageCache {
         manifest(buildingID: buildingID) != nil
     }
 
+    /// The ARWorldMap bytes for a downloaded building, verified against the
+    /// manifest checksum.
+    ///
+    /// A downloaded building keeps its world map here, not under
+    /// `Zones/<id>/`. Callers that only looked in the local zone store reported
+    /// "this zone has no saved world map" for a map that was present the whole
+    /// time. Returns nil when the package genuinely carries routing data only.
+    func worldMapData(buildingID: UUID) -> Data? {
+        guard let manifest = manifest(buildingID: buildingID) else {
+            DiagnosticsLog.shared.log("World map lookup: no cached package for \(buildingID.uuidString.prefix(8))")
+            return nil
+        }
+        guard let artifact = manifest.artifacts.first(where: { $0.kind == .worldmap }) else {
+            DiagnosticsLog.shared.log(
+                "World map lookup: package v\(manifest.version) carries routing data only"
+            )
+            return nil
+        }
+        guard let data = data(for: artifact, buildingID: buildingID, version: manifest.version) else {
+            // Present in the manifest but unreadable or failing its checksum.
+            DiagnosticsLog.shared.log(
+                "World map lookup: artifact \(artifact.localFileName) missing or failed its checksum"
+            )
+            return nil
+        }
+        DiagnosticsLog.shared.log(
+            "World map lookup: \(data.count) bytes for v\(manifest.version)"
+        )
+        return data
+    }
+
+    /// True when this building can support camera relocalization on this
+    /// device — the bytes are present and intact, not merely promised.
+    func hasUsableWorldMap(buildingID: UUID) -> Bool {
+        worldMapData(buildingID: buildingID) != nil
+    }
+
     // MARK: - Writing
 
     /// Writes a verified package atomically. Staging directory first, then a

@@ -567,6 +567,9 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
                     component: "AR world map", detail: error.localizedDescription
                 )
             }
+            DiagnosticsLog.shared.log(
+                "Save: ARWorldMap serialized, \(mapData.count) bytes, \(map.anchors.count) anchors"
+            )
             let imageData = snapshot?.jpegData(compressionQuality: 0.7)
 
             var zone = prepared

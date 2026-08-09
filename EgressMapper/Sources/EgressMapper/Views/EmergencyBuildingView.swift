@@ -135,6 +135,10 @@ struct EvacuationView: View {
     /// The verified downloaded package for this building, when there is one.
     @State private var package: MapPackageManifest?
     @State private var packageGraph: BuildingGraph?
+    /// Verified ARWorldMap bytes for this building, when the download actually
+    /// contains one. Nil means routing data only — which must never block
+    /// evacuation, only AR.
+    @State private var worldMapData: Data?
     @State private var showLocalization = false
     @State private var locatedBy: BuildingLocalizationService.Method?
     /// The confirmed localization result, once the occupant accepts it.
@@ -217,10 +221,17 @@ struct EvacuationView: View {
             }
             if let package {
                 Label(
-                    "Offline map v\(package.version) · \(package.zones.filter(\.hasWorldMap).count) AR zone(s)",
+                    "Offline map v\(package.version) · \(package.nodes.count) points",
                     systemImage: "arrow.down.circle.fill"
                 )
                 .font(.caption).foregroundStyle(.green)
+                if isRoutingDataOnly {
+                    Label(
+                        "AR localization unavailable — map contains routing data only.",
+                        systemImage: "arkit"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                }
             }
             if let loadError {
                 Text(loadError).font(.caption).foregroundStyle(.red)
@@ -231,8 +242,14 @@ struct EvacuationView: View {
     /// Camera localization needs a downloaded package with at least one
     /// ARWorldMap — never offered when it could not possibly work.
     private var canLocalizeWithCamera: Bool {
-        guard let package else { return false }
+        guard let package, worldMapData != nil, ARSessionManager.isSupported else { return false }
         return !BuildingLocalizationService.relocalizableZones(in: package).isEmpty
+    }
+
+    /// The package downloaded fine, it just has no AR map. Worth saying so:
+    /// the user would otherwise wonder why the camera option is missing.
+    private var isRoutingDataOnly: Bool {
+        package != nil && worldMapData == nil
     }
 
     private var locationSection: some View {
@@ -270,8 +287,10 @@ struct EvacuationView: View {
                 Text("Point the camera around you to be found automatically, or pick the nearest room.")
             } else if package == nil {
                 Text("Download this building from Saved Maps to enable camera localization. Picking a room works either way.")
+            } else if isRoutingDataOnly {
+                Text("AR localization is unavailable for this map — it contains routing data only. Select your room manually; evacuation guidance still works.")
             } else {
-                Text("This building has no AR map recorded, so pick the nearest room.")
+                Text("This device cannot use camera relocalization. Pick the nearest room.")
             }
         }
     }
@@ -372,7 +391,10 @@ struct EvacuationView: View {
                 floor: package?.defaultFloorID ?? "default",
                 zoneName: building.name
             )
-            if canLocalizeWithCamera && ARSessionManager.isSupported {
+            // AR only when a decodable world map is actually on the device.
+            // Everything else falls through to 2D — evacuation must not depend
+            // on AR being available.
+            if let worldMapData, ARSessionManager.isSupported {
                 GuidanceView(
                     zone: zone,
                     route: best.nodes,
@@ -385,7 +407,8 @@ struct EvacuationView: View {
                             worldPosition: graph.node(startNodeID)?.worldPosition ?? .zero
                         )
                     ),
-                    liveService: service
+                    liveService: service,
+                    worldMapData: worldMapData
                 ) { navigating = false }
             } else {
                 TwoDGuidanceView(
@@ -447,6 +470,12 @@ struct EvacuationView: View {
         if let cached = session.cachedPackage(for: building.id) {
             package = cached
             packageGraph = MapPackageBuilder.graph(from: cached)
+            // Checked once, from the bytes on disk. The manifest promising a
+            // world map is not the same as the file being present and intact.
+            worldMapData = session.packages.worldMapData(buildingID: building.id)
+            DiagnosticsLog.shared.log(
+                "Emergency loaded \(building.name) v\(cached.version): \(cached.nodes.count) nodes, worldMap=\(worldMapData?.count ?? 0) bytes"
+            )
         }
 
         let remote = RemoteBuilding(
