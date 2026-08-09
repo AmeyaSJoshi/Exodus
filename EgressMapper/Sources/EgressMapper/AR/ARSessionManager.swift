@@ -123,15 +123,48 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     }
 
     // MARK: AR
-    let arView: ARView = {
-        let v = ARView(frame: .zero)
+
+    /// Created on first use, never in `init`.
+    ///
+    /// `ARView(frame:)` builds a Metal renderer, a RealityKit scene and an
+    /// ARSession — tens of milliseconds of main-thread work. This used to be an
+    /// eagerly initialised stored property, so *every* construction of an
+    /// `ARSessionManager` paid for one. SwiftUI re-runs the initializer
+    /// expression of `@State private var manager = ARSessionManager()` each
+    /// time the view struct is created and throws the extra instances away, so
+    /// a mapping screen could allocate and discard several ARViews before
+    /// showing anything. Deferring it means a discarded manager costs nothing.
+    private var storedARView: ARView?
+
+    var arView: ARView {
+        if let storedARView { return storedARView }
+        let signpost = Startup.signposter.beginInterval("arview-create")
+        let started = Date()
+        let v = HostingARView(frame: .zero)
+        v.manager = self
         // We supply our own configuration; let RealityKit not override it.
         v.automaticallyConfigureSession = false
         v.environment.background = .cameraFeed()
+        storedARView = v
+        v.session.delegate = self
+        observeRenderLoop(v)
+        Startup.signposter.endInterval("arview-create", signpost)
+        DiagnosticsLog.shared.log(
+            "\(shortID) ARView created in \(Int(Date().timeIntervalSince(started) * 1000))ms — arView=\(ObjectIdentifier(v).debugDescription) session=\(ObjectIdentifier(v.session).debugDescription)"
+        )
         return v
-    }()
+    }
+
+    /// True when the ARView has been built. Lets callers ask about AR state
+    /// without causing the allocation they are asking about.
+    var hasARView: Bool { storedARView != nil }
 
     private var session: ARSession { arView.session }
+    /// Timestamp of the most recent frame RealityKit actually *rendered*.
+    /// Distinguishes "the session stopped delivering" from "the session is
+    /// fine but the renderer stopped", which look identical on screen.
+    private(set) var lastRenderTime: Date?
+    private var renderSubscription: Cancellable?
     private var zone: MappingZone?
     private var markerAnchors: [UUID: AnchorEntity] = [:]
     private var lastRecordedPosition: SIMD3<Float>?
@@ -154,8 +187,23 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     init(store: ZoneFileStore = ZoneFileStore()) {
         self.store = store
         super.init()
-        session.delegate = self
-        DiagnosticsLog.shared.log("ARSessionManager \(shortID) created")
+        // Deliberately does not touch `arView`: constructing a manager must
+        // stay cheap, because SwiftUI constructs and discards several.
+        DiagnosticsLog.shared.log("ARSessionManager \(shortID) created (no ARView yet)")
+    }
+
+    /// Records when RealityKit last drew. `SceneEvents.Update` fires once per
+    /// rendered frame, so a gap here with ARFrames still arriving is proof the
+    /// renderer stalled rather than the session.
+    private func observeRenderLoop(_ view: ARView) {
+        renderSubscription = view.scene.subscribe(to: SceneEvents.Update.self) { [weak self] _ in
+            self?.lastRenderTime = Date()
+        }
+    }
+
+    /// Seconds since RealityKit last drew a frame, or nil if it never has.
+    var secondsSinceRender: TimeInterval? {
+        lastRenderTime.map { Date().timeIntervalSince($0) }
     }
 
     deinit {
@@ -219,12 +267,14 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     }
 
     func pause() {
+        guard hasARView else { return }
         session.pause()
         cameraFeed = .idle
         stopFrameWatchdog()
     }
 
     func stop() {
+        guard hasARView else { stopFrameWatchdog(); mode = .idle; return }
         session.pause()
         stopFrameWatchdog()
         clearMarkers()
@@ -268,6 +318,20 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
         }
         guard let last = lastFrameTime else { return }
         let gap = Date().timeIntervalSince(last)
+
+        // Frames are arriving but RealityKit has stopped drawing them. That is
+        // the frozen-preview shape: the session is healthy, the renderer is
+        // not. Recorded separately so a device log says which one happened
+        // instead of leaving both looking identical.
+        if gap < Self.frameStallSeconds, let renderGap = secondsSinceRender,
+           renderGap >= Self.frameStallSeconds {
+            DiagnosticsLog.shared.log(
+                "\(shortID) RENDER STALL — ARFrames flowing (\(frameCount), gap \(String(format: "%.1f", gap))s) but no draw for \(String(format: "%.1f", renderGap))s"
+            )
+            recoverRenderLoop()
+            return
+        }
+
         if gap >= Self.frameStallSeconds {
             let seconds = Int(gap)
             if cameraFeed != .stalled(seconds: seconds) {
@@ -279,6 +343,32 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
         } else if cameraFeed != .active {
             cameraFeed = .active
         }
+    }
+
+    /// Brings RealityKit's render loop back without touching tracking.
+    ///
+    /// Re-running the session with no options is the documented way to resume;
+    /// it keeps the world map, the anchors and the coordinate space. Nothing
+    /// here resets tracking — doing so would destroy the map being recorded.
+    private func recoverRenderLoop() {
+        guard hasARView, let config = activeConfiguration, mode != .idle else { return }
+        DiagnosticsLog.shared.log("\(shortID) nudging the render loop, preserving the map")
+        session.run(config, options: [])
+    }
+
+    /// Called by the view layer when the ARView re-enters the window, which is
+    /// where RealityKit is known to leave its render loop parked.
+    func viewAttachedToWindow() {
+        guard hasARView, mode != .idle else { return }
+        DiagnosticsLog.shared.log(
+            "\(shortID) ARView attached to window — frames=\(frameCount) lastRender=\(secondsSinceRender.map { String(format: "%.2fs ago", $0) } ?? "never")"
+        )
+        // Only if it has actually stopped drawing; a healthy return is a no-op.
+        if let renderGap = secondsSinceRender, renderGap >= 0.5 { recoverRenderLoop() }
+    }
+
+    func viewDetachedFromWindow() {
+        DiagnosticsLog.shared.log("\(shortID) ARView detached from window (mode=\(mode))")
     }
 
     /// Re-runs the *same* configuration without resetting tracking, so an
@@ -324,6 +414,7 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     }
 
     private func clearMarkers() {
+        guard hasARView else { markerAnchors.removeAll(); return }
         for (_, anchor) in markerAnchors { arView.scene.removeAnchor(anchor) }
         markerAnchors.removeAll()
     }
