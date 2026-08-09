@@ -38,6 +38,18 @@ struct CatalogBuilding: Codable, Hashable, Identifiable {
     var nodeCount: Int
     var artifactCount: Int
 
+    // Georeference anchor and cached OSM footprint (migrations 20260806000900
+    // and ...1000). Only the `buildings` table select returns these; the
+    // catalogue RPC does not, which is why they are optional.
+    var anchorLat: Double?
+    var anchorLng: Double?
+    var anchorAltM: Double?
+    var headingDeg: Double?
+    var scale: Double?
+    var formattedAddress: String?
+    var footprintGeoJSON: FootprintPolygon?
+    var footprintHeightM: Double?
+
     enum CodingKeys: String, CodingKey {
         case id, name, address, description, status
         case activeMapVersionID = "active_map_version_id"
@@ -45,10 +57,101 @@ struct CatalogBuilding: Codable, Hashable, Identifiable {
         case publishedAt = "published_at"
         case nodeCount = "node_count"
         case artifactCount = "artifact_count"
+        case anchorLat = "anchor_lat"
+        case anchorLng = "anchor_lng"
+        case anchorAltM = "anchor_alt_m"
+        case headingDeg = "heading_deg"
+        case scale
+        case formattedAddress = "formatted_address"
+        case footprintGeoJSON = "footprint_geojson"
+        case footprintHeightM = "footprint_height_m"
+    }
+
+    init(
+        id: UUID,
+        name: String,
+        address: String? = nil,
+        description: String? = nil,
+        status: String = "draft",
+        activeMapVersionID: UUID? = nil,
+        version: Int? = nil,
+        publishedAt: String? = nil,
+        nodeCount: Int = 0,
+        artifactCount: Int = 0,
+        anchorLat: Double? = nil,
+        anchorLng: Double? = nil,
+        anchorAltM: Double? = nil,
+        headingDeg: Double? = nil,
+        scale: Double? = nil,
+        formattedAddress: String? = nil,
+        footprintGeoJSON: FootprintPolygon? = nil,
+        footprintHeightM: Double? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.address = address
+        self.description = description
+        self.status = status
+        self.activeMapVersionID = activeMapVersionID
+        self.version = version
+        self.publishedAt = publishedAt
+        self.nodeCount = nodeCount
+        self.artifactCount = artifactCount
+        self.anchorLat = anchorLat
+        self.anchorLng = anchorLng
+        self.anchorAltM = anchorAltM
+        self.headingDeg = headingDeg
+        self.scale = scale
+        self.formattedAddress = formattedAddress
+        self.footprintGeoJSON = footprintGeoJSON
+        self.footprintHeightM = footprintHeightM
+    }
+
+    /// Two queries feed this one model: the catalogue RPC, which computes
+    /// `status`/`node_count`/`artifact_count`, and a plain `buildings` select,
+    /// which carries the anchor but none of the computed columns. Defaulting
+    /// the missing side here is what lets both decode into a single type.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        address = try c.decodeIfPresent(String.self, forKey: .address)
+        description = try c.decodeIfPresent(String.self, forKey: .description)
+        status = try c.decodeIfPresent(String.self, forKey: .status) ?? "draft"
+        activeMapVersionID = try c.decodeIfPresent(UUID.self, forKey: .activeMapVersionID)
+        version = try c.decodeIfPresent(Int.self, forKey: .version)
+        publishedAt = try c.decodeIfPresent(String.self, forKey: .publishedAt)
+        nodeCount = try c.decodeIfPresent(Int.self, forKey: .nodeCount) ?? 0
+        artifactCount = try c.decodeIfPresent(Int.self, forKey: .artifactCount) ?? 0
+        anchorLat = try c.decodeIfPresent(Double.self, forKey: .anchorLat)
+        anchorLng = try c.decodeIfPresent(Double.self, forKey: .anchorLng)
+        anchorAltM = try c.decodeIfPresent(Double.self, forKey: .anchorAltM)
+        headingDeg = try c.decodeIfPresent(Double.self, forKey: .headingDeg)
+        scale = try c.decodeIfPresent(Double.self, forKey: .scale)
+        formattedAddress = try c.decodeIfPresent(String.self, forKey: .formattedAddress)
+        footprintGeoJSON = try c.decodeIfPresent(FootprintPolygon.self, forKey: .footprintGeoJSON)
+        footprintHeightM = try c.decodeIfPresent(Double.self, forKey: .footprintHeightM)
     }
 
     var isPublished: Bool { status == "published" }
+
+    /// The anchor is only usable when both coordinates are present.
+    var anchor: BuildingAnchor? {
+        guard let anchorLat, let anchorLng else { return nil }
+        return BuildingAnchor(
+            latitude: anchorLat,
+            longitude: anchorLng,
+            altitudeM: anchorAltM ?? 0,
+            headingDeg: headingDeg ?? 0,
+            scale: (scale ?? 1) > 0 ? (scale ?? 1) : 1
+        )
+    }
 }
+
+/// The `buildings` table and the catalogue RPC are two views of one row, so
+/// they decode into one model. The old name is kept as an alias because both
+/// spellings are load-bearing at a dozen call sites.
+typealias RemoteBuilding = CatalogBuilding
 
 /// How a building stands on *this* device.
 enum BuildingAvailability: Equatable, Hashable {

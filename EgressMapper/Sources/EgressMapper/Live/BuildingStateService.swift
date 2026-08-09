@@ -51,53 +51,6 @@ enum ConnectionStatus: String, Equatable {
     }
 }
 
-struct RemoteBuilding: Codable, Hashable, Identifiable {
-    var id: UUID
-    var name: String
-    var address: String?
-    var activeMapVersionID: UUID?
-
-    // Georeference anchor (migration 20260806000900). Null until an
-    // administrator sets the building's location on the dashboard; the focus
-    // map needs all of it to place the local AR frame on the real world.
-    var anchorLat: Double?
-    var anchorLng: Double?
-    var anchorAltM: Double?
-    var headingDeg: Double?
-    var scale: Double?
-    var formattedAddress: String?
-
-    // OSM building footprint, cached into the row by the dashboard (migration
-    // 20260806001000). The phone never calls Overpass itself — it reads what
-    // the console already resolved.
-    var footprintGeoJSON: FootprintPolygon?
-    var footprintHeightM: Double?
-
-    enum CodingKeys: String, CodingKey {
-        case id, name, address, scale
-        case activeMapVersionID = "active_map_version_id"
-        case anchorLat = "anchor_lat"
-        case anchorLng = "anchor_lng"
-        case anchorAltM = "anchor_alt_m"
-        case headingDeg = "heading_deg"
-        case formattedAddress = "formatted_address"
-        case footprintGeoJSON = "footprint_geojson"
-        case footprintHeightM = "footprint_height_m"
-    }
-
-    /// The anchor is only usable when both coordinates are present.
-    var anchor: BuildingAnchor? {
-        guard let anchorLat, let anchorLng else { return nil }
-        return BuildingAnchor(
-            latitude: anchorLat,
-            longitude: anchorLng,
-            altitudeM: anchorAltM ?? 0,
-            headingDeg: headingDeg ?? 0,
-            scale: (scale ?? 1) > 0 ? (scale ?? 1) : 1
-        )
-    }
-}
-
 /// A GeoJSON Polygon as stored in `buildings.footprint_geojson`. Only the
 /// outer ring is used; the dashboard's Overpass proxy never emits holes.
 struct FootprintPolygon: Codable, Hashable {

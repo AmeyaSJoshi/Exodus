@@ -156,6 +156,25 @@ final class SupabaseBuildingService: BuildingStateService {
             .order("name")
             .execute()
             .value
+
+        // The catalogue RPC computes status/counts but cannot return the
+        // anchor columns, and this select is the reverse. Folding the anchor
+        // into the catalogue entries means callers read one list, not two that
+        // have to be joined by id at the point of use.
+        let anchors = Dictionary(uniqueKeysWithValues: buildings.map { ($0.id, $0) })
+        catalog = catalog.map { entry in
+            guard let a = anchors[entry.id] else { return entry }
+            var merged = entry
+            merged.anchorLat = a.anchorLat
+            merged.anchorLng = a.anchorLng
+            merged.anchorAltM = a.anchorAltM
+            merged.headingDeg = a.headingDeg
+            merged.scale = a.scale
+            merged.formattedAddress = a.formattedAddress
+            merged.footprintGeoJSON = a.footprintGeoJSON
+            merged.footprintHeightM = a.footprintHeightM
+            return merged
+        }
     }
 
     /// Downloads the published graph and caches it. On failure, falls back to

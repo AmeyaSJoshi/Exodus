@@ -239,13 +239,11 @@ struct BuildingsView: View {
                                 .font(.caption2).foregroundStyle(.secondary)
                             Button("Attach a saved map and publish") { attachTarget = building }
                                 .font(.caption)
-                            if let remote = session.service.buildings.first(where: { $0.id == building.id }) {
-                                NavigationLink {
-                                    FocusMapLoader(session: session, building: remote)
-                                } label: {
-                                    Label("View in 3D", systemImage: "view.3d")
-                                        .font(.caption)
-                                }
+                            NavigationLink {
+                                FocusMapLoader(session: session, building: building)
+                            } label: {
+                                Label("View in 3D", systemImage: "view.3d")
+                                    .font(.caption)
                             }
                         }
                     }
