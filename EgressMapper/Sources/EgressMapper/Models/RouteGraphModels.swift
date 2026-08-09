@@ -87,13 +87,24 @@ struct RouteNode: Identifiable, Codable, Hashable {
     var type: RouteNodeType
     var position: CodableTransform
     var zoneID: UUID
+    /// Which floor the node sits on. Optional so zones saved before multi-floor
+    /// existed still decode; nil reads as the building's single default floor.
+    var floorID: String?
 
-    init(id: UUID = UUID(), name: String, type: RouteNodeType, position: CodableTransform, zoneID: UUID) {
+    init(
+        id: UUID = UUID(),
+        name: String,
+        type: RouteNodeType,
+        position: CodableTransform,
+        zoneID: UUID,
+        floorID: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.type = type
         self.position = position
         self.zoneID = zoneID
+        self.floorID = floorID
     }
 
     var worldPosition: SIMD3<Float> { position.position }

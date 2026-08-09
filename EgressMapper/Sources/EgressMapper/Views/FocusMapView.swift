@@ -4,21 +4,39 @@ import SwiftUI
 /// The 3D building focus view — the native counterpart of the dashboard's
 /// `BuildingFocusView`. Same engine (MapLibre) and same style, so a building
 /// looks the same on the phone as it does on the command console.
-///
-/// Phase 1 renders the georeferenced base map only; the indoor overlays
-/// (slabs, rooms, route ribbons, labels) arrive with the graph.
 struct FocusMapView: View {
     let building: RemoteBuilding
+    /// The published graph, already loaded by the app's Supabase layer. Passing
+    /// it in avoids a second fetch and keeps this view's "which map version"
+    /// answer identical to every other screen's.
+    var graph: BuildingGraph?
+
+    /// `nil` means "all floors": everything at full opacity, matching the web
+    /// view's default.
+    @State private var activeFloor: String?
+
+    private var floors: [String] {
+        guard let graph else { return [] }
+        return FocusOverlayBuilder.floors(in: graph)
+    }
 
     var body: some View {
         Group {
             if let anchor = building.anchor {
-                FocusMapRepresentable(
-                    anchor: anchor,
-                    footprint: building.footprintGeoJSON,
-                    footprintHeightM: building.footprintHeightM
-                )
-                .ignoresSafeArea(edges: .bottom)
+                ZStack(alignment: .topLeading) {
+                    FocusMapRepresentable(
+                        anchor: anchor,
+                        footprint: building.footprintGeoJSON,
+                        footprintHeightM: building.footprintHeightM,
+                        graph: graph,
+                        activeFloor: activeFloor
+                    )
+                    .ignoresSafeArea(edges: .bottom)
+
+                    if floors.count > 1 {
+                        floorPicker
+                    }
+                }
             } else {
                 ContentUnavailableView(
                     "No location set",
@@ -30,6 +48,51 @@ struct FocusMapView: View {
         .navigationTitle(building.name)
         .navigationBarTitleDisplayMode(.inline)
     }
+
+    private var floorPicker: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                chip(title: "All floors", isActive: activeFloor == nil) { activeFloor = nil }
+                ForEach(floors, id: \.self) { floor in
+                    chip(title: floor, isActive: activeFloor == floor) { activeFloor = floor }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+        }
+    }
+
+    private func chip(title: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(isActive ? Color.red : Color.black.opacity(0.55), in: Capsule())
+                .foregroundStyle(isActive ? .white : .secondary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isActive ? [.isSelected] : [])
+    }
+}
+
+/// Loads the published graph for a building, then hands it to the map. Uses
+/// the app's existing service — same fetch, same cache, same "which version is
+/// live" answer as every other screen.
+struct FocusMapLoader: View {
+    @Bindable var session: BackendSession
+    let building: RemoteBuilding
+
+    @State private var graph: BuildingGraph?
+
+    var body: some View {
+        FocusMapView(building: building, graph: graph)
+            .task {
+                guard graph == nil else { return }
+                try? await session.service.loadGraph(for: building)
+                graph = session.service.graph
+            }
+    }
 }
 
 // MARK: - UIKit bridge
@@ -38,6 +101,8 @@ private struct FocusMapRepresentable: UIViewRepresentable {
     let anchor: BuildingAnchor
     let footprint: FootprintPolygon?
     let footprintHeightM: Double?
+    let graph: BuildingGraph?
+    let activeFloor: String?
 
     /// Every source and layer this view adds carries this prefix. The mute
     /// pass skips it — without that guard the pass repaints the overlay into
@@ -81,19 +146,28 @@ private struct FocusMapRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ mapView: MLNMapView, context: Context) {
-        // The footprint can arrive after the style has already loaded, in
-        // which case didFinishLoading has been and gone — apply it here too.
-        if context.coordinator.footprint != footprint || context.coordinator.footprintHeightM != footprintHeightM {
-            context.coordinator.footprint = footprint
-            context.coordinator.footprintHeightM = footprintHeightM
-            if let style = mapView.style { context.coordinator.applyShell(to: style) }
+        let coordinator = context.coordinator
+        let overlaysChanged = coordinator.footprint != footprint
+            || coordinator.footprintHeightM != footprintHeightM
+            || coordinator.graph != graph
+            || coordinator.activeFloor != activeFloor
+
+        // Data and floor selection can both change after the style has loaded,
+        // in which case didFinishLoading has been and gone — apply them here.
+        if overlaysChanged {
+            coordinator.footprint = footprint
+            coordinator.footprintHeightM = footprintHeightM
+            coordinator.graph = graph
+            coordinator.activeFloor = activeFloor
+            coordinator.anchor = anchor
+            if let style = mapView.style { coordinator.applyOverlays(to: style) }
         }
 
         // Re-centre only when the anchor itself changed; leaving the camera
         // alone otherwise means a user's pan/tilt is not yanked back on every
         // SwiftUI update.
-        guard context.coordinator.appliedAnchor != anchor else { return }
-        context.coordinator.appliedAnchor = anchor
+        guard coordinator.appliedAnchor != anchor else { return }
+        coordinator.appliedAnchor = anchor
         mapView.setCamera(
             MLNMapCamera(
                 lookingAtCenter: CLLocationCoordinate2D(latitude: anchor.latitude, longitude: anchor.longitude),
@@ -106,26 +180,52 @@ private struct FocusMapRepresentable: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(anchor: anchor, footprint: footprint, footprintHeightM: footprintHeightM)
+        Coordinator(
+            anchor: anchor,
+            footprint: footprint,
+            footprintHeightM: footprintHeightM,
+            graph: graph,
+            activeFloor: activeFloor
+        )
     }
 
     final class Coordinator: NSObject, MLNMapViewDelegate {
+        var anchor: BuildingAnchor
         var appliedAnchor: BuildingAnchor
         var footprint: FootprintPolygon?
         var footprintHeightM: Double?
+        var graph: BuildingGraph?
+        var activeFloor: String?
 
-        init(anchor: BuildingAnchor, footprint: FootprintPolygon?, footprintHeightM: Double?) {
+        private let prefix = FocusMapRepresentable.overlayPrefix
+        private let ghostOpacity = 0.1
+
+        init(
+            anchor: BuildingAnchor,
+            footprint: FootprintPolygon?,
+            footprintHeightM: Double?,
+            graph: BuildingGraph?,
+            activeFloor: String?
+        ) {
+            self.anchor = anchor
             self.appliedAnchor = anchor
             self.footprint = footprint
             self.footprintHeightM = footprintHeightM
+            self.graph = graph
+            self.activeFloor = activeFloor
         }
 
         func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
-            // Mute the base style in place so the surroundings read as faint
-            // context, exactly as the dashboard does. Editing the loaded style
-            // rather than shipping a second style keeps one source of truth.
+            muteBaseStyle(style)
+            applyOverlays(to: style)
+        }
+
+        /// Mutes the base style in place so the surroundings read as faint
+        /// context, exactly as the dashboard does. Editing the loaded style
+        /// rather than shipping a second style keeps one source of truth.
+        private func muteBaseStyle(_ style: MLNStyle) {
             for layer in style.layers {
-                if layer.identifier.hasPrefix(FocusMapRepresentable.overlayPrefix) { continue }
+                if layer.identifier.hasPrefix(prefix) { continue }
                 switch layer {
                 case let fill as MLNFillStyleLayer:
                     fill.fillColor = NSExpression(forConstantValue: UIColor(red: 0.10, green: 0.11, blue: 0.13, alpha: 1))
@@ -145,16 +245,157 @@ private struct FocusMapRepresentable: UIViewRepresentable {
                     continue
                 }
             }
-
-            applyShell(to: style)
         }
 
-        /// Idempotent: updates the existing source when the footprint changes
-        /// rather than adding a second one.
+        /// Idempotent: every source is updated in place when it already exists,
+        /// so this is safe to call on style load and on every data change.
+        func applyOverlays(to style: MLNStyle) {
+            applyShell(to: style)
+            guard let graph else { return }
+
+            let floors = FocusOverlayBuilder.floors(in: graph)
+            // Ghosting is done with a predicate pair rather than a data-driven
+            // opacity expression: MapLibre Native's NSExpression dialect
+            // diverges from the web style spec, and the visual result is what
+            // the spec calls for, not the mechanism.
+            let activeIdx = activeFloor.map { FocusOverlayBuilder.floorIndex($0, in: floors) }
+
+            upsert(
+                style, "slabs",
+                features: FocusOverlayBuilder.slabs(graph: graph, anchor: anchor, floors: floors),
+                activeIdx: activeIdx,
+                fullOpacity: 0.6
+            ) { layer in
+                layer.fillExtrusionColor = NSExpression(forConstantValue: UIColor(red: 0.89, green: 0.91, blue: 0.94, alpha: 1))
+            }
+
+            upsert(
+                style, "rooms",
+                features: FocusOverlayBuilder.rooms(graph: graph, anchor: anchor, floors: floors),
+                activeIdx: activeIdx,
+                fullOpacity: 0.85
+            ) { layer in
+                layer.fillExtrusionColor = NSExpression(forConstantValue: UIColor(red: 0.38, green: 0.65, blue: 0.98, alpha: 1))
+            }
+
+            upsert(
+                style, "routes",
+                features: FocusOverlayBuilder.routes(graph: graph, anchor: anchor, floors: floors),
+                activeIdx: activeIdx,
+                fullOpacity: 1
+            ) { layer in
+                // Bright green for a step-free route, red where it involves
+                // stairs — the split the graph actually records.
+                layer.fillExtrusionColor = NSExpression(
+                    format: "TERNARY(stepFree == YES, %@, %@)",
+                    UIColor(red: 0.13, green: 1.0, blue: 0.53, alpha: 1),
+                    UIColor(red: 1.0, green: 0.30, blue: 0.30, alpha: 1)
+                )
+            }
+
+            applyLabels(to: style, graph: graph, floors: floors, activeIdx: activeIdx)
+        }
+
+        // MARK: Layers
+
+        /// Adds (or updates) one source plus an active/ghost fill-extrusion
+        /// pair. Splitting by predicate is what gives the active floor full
+        /// opacity while the others stay faint.
+        private func upsert(
+            _ style: MLNStyle,
+            _ name: String,
+            features: [[String: Any]],
+            activeIdx: Int?,
+            fullOpacity: Double,
+            configure: (MLNFillExtrusionStyleLayer) -> Void
+        ) {
+            let sourceID = prefix + name
+            guard let data = FocusOverlayBuilder.collectionData(features),
+                  let shape = try? MLNShape(data: data, encoding: String.Encoding.utf8.rawValue)
+            else { return }
+
+            let source: MLNShapeSource
+            if let existing = style.source(withIdentifier: sourceID) as? MLNShapeSource {
+                existing.shape = shape
+                source = existing
+            } else {
+                source = MLNShapeSource(identifier: sourceID, shape: shape, options: nil)
+                style.addSource(source)
+            }
+
+            for variant in ["", "-ghost"] {
+                let isGhost = !variant.isEmpty
+                let layerID = sourceID + variant
+                let layer: MLNFillExtrusionStyleLayer
+                if let existing = style.layer(withIdentifier: layerID) as? MLNFillExtrusionStyleLayer {
+                    layer = existing
+                } else {
+                    layer = MLNFillExtrusionStyleLayer(identifier: layerID, source: source)
+                    layer.fillExtrusionHeight = NSExpression(forKeyPath: "top")
+                    layer.fillExtrusionBase = NSExpression(forKeyPath: "base")
+                    configure(layer)
+                    style.addLayer(layer)
+                }
+                layer.fillExtrusionOpacity = NSExpression(forConstantValue: isGhost ? ghostOpacity : fullOpacity)
+                layer.predicate = predicate(activeIdx: activeIdx, ghost: isGhost)
+            }
+        }
+
+        private func applyLabels(to style: MLNStyle, graph: BuildingGraph, floors: [String], activeIdx: Int?) {
+            let sourceID = prefix + "labels"
+            let features = FocusOverlayBuilder.labels(graph: graph, anchor: anchor, floors: floors)
+            guard let data = FocusOverlayBuilder.collectionData(features),
+                  let shape = try? MLNShape(data: data, encoding: String.Encoding.utf8.rawValue)
+            else { return }
+
+            let source: MLNShapeSource
+            if let existing = style.source(withIdentifier: sourceID) as? MLNShapeSource {
+                existing.shape = shape
+                source = existing
+            } else {
+                source = MLNShapeSource(identifier: sourceID, shape: shape, options: nil)
+                style.addSource(source)
+            }
+
+            for variant in ["", "-ghost"] {
+                let isGhost = !variant.isEmpty
+                let layerID = sourceID + variant
+                let layer: MLNSymbolStyleLayer
+                if let existing = style.layer(withIdentifier: layerID) as? MLNSymbolStyleLayer {
+                    layer = existing
+                } else {
+                    layer = MLNSymbolStyleLayer(identifier: layerID, source: source)
+                    layer.text = NSExpression(forKeyPath: "label")
+                    layer.textFontSize = NSExpression(format: "TERNARY(isExit == YES, 13, 11)")
+                    layer.textColor = NSExpression(
+                        format: "TERNARY(isExit == YES, %@, %@)",
+                        UIColor(red: 0.13, green: 0.77, blue: 0.37, alpha: 1),
+                        UIColor(red: 0.90, green: 0.91, blue: 0.93, alpha: 1)
+                    )
+                    layer.textHaloColor = NSExpression(forConstantValue: UIColor(red: 0.05, green: 0.05, blue: 0.07, alpha: 1))
+                    layer.textHaloWidth = NSExpression(forConstantValue: 1.5)
+                    layer.textTranslation = NSExpression(forConstantValue: NSValue(cgVector: CGVector(dx: 0, dy: -8)))
+                    style.addLayer(layer)
+                }
+                layer.textOpacity = NSExpression(forConstantValue: isGhost ? ghostOpacity : 1.0)
+                layer.predicate = predicate(activeIdx: activeIdx, ghost: isGhost)
+            }
+        }
+
+        /// With no floor selected every feature is drawn at full opacity and
+        /// the ghost layer is switched off entirely.
+        private func predicate(activeIdx: Int?, ghost: Bool) -> NSPredicate {
+            guard let activeIdx else { return NSPredicate(value: !ghost) }
+            return ghost
+                ? NSPredicate(format: "floorIdx != %d", activeIdx)
+                : NSPredicate(format: "floorIdx == %d", activeIdx)
+        }
+
+        /// The OSM building shell, cached into the anchor row by the dashboard.
         func applyShell(to style: MLNStyle) {
-            let sourceID = FocusMapRepresentable.overlayPrefix + "shell"
-            let fillID = FocusMapRepresentable.overlayPrefix + "shell-fill"
-            let outlineID = FocusMapRepresentable.overlayPrefix + "shell-outline"
+            let sourceID = prefix + "shell"
+            let fillID = prefix + "shell-fill"
+            let outlineID = prefix + "shell-outline"
 
             guard let footprint else { return }
             let height = footprintHeightM ?? 3

@@ -241,7 +241,7 @@ struct BuildingsView: View {
                                 .font(.caption)
                             if let remote = session.service.buildings.first(where: { $0.id == building.id }) {
                                 NavigationLink {
-                                    FocusMapView(building: remote)
+                                    FocusMapLoader(session: session, building: remote)
                                 } label: {
                                     Label("View in 3D", systemImage: "view.3d")
                                         .font(.caption)

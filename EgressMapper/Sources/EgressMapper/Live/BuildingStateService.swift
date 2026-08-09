@@ -216,7 +216,8 @@ enum RemoteGraphMapper {
                 name: remote.name,
                 type: RouteNodeType(rawValue: remote.type) ?? .hallwayPoint,
                 position: CodableTransform(m),
-                zoneID: buildingID
+                zoneID: buildingID,
+                floorID: remote.floorID
             )
         }
 
