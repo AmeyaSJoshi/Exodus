@@ -82,6 +82,7 @@ function LoginForm() {
 function Console({ onSignOut }: { onSignOut: () => void }) {
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [buildingID, setBuildingID] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [nodes, setNodes] = useState<RouteNode[]>([]);
   const [edges, setEdges] = useState<RouteEdge[]>([]);
   const [live, setLive] = useState<Record<string, LiveEdgeState>>({});
@@ -108,6 +109,30 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
   }, []);
 
   const building = buildings.find((b) => b.id === buildingID) ?? null;
+
+  // Removes the building and, by cascade, every version of its map, its
+  // artifacts and its live closures. delete_building() re-checks authorization
+  // server-side, so an occupant reaching this code still gets refused.
+  async function deleteBuilding() {
+    if (!building) return;
+    const confirmed = window.confirm(
+      `Delete "${building.name}"?\n\n` +
+        "This permanently removes the building, every published version of its map " +
+        "and its live closures, for everyone in your organization. Occupants will " +
+        "no longer see it. This cannot be undone.",
+    );
+    if (!confirmed) return;
+
+    setDeleting(true);
+    setError(null);
+    const { error } = await supabase.rpc("delete_building", { p_building_id: building.id });
+    setDeleting(false);
+    if (error) return setError(error.message);
+
+    const remaining = buildings.filter((b) => b.id !== building.id);
+    setBuildings(remaining);
+    setBuildingID(remaining[0]?.id ?? null);
+  }
 
   // Graph + live state for the selected building
   const loadGraph = useCallback(async () => {
@@ -236,6 +261,14 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
             <option value="all">All floors</option>
             {floors.map((f) => <option key={f} value={f}>{f}</option>)}
           </select>
+          <button
+            onClick={deleteBuilding}
+            disabled={!building || deleting}
+            title="Delete this building and all of its map versions"
+            className="rounded-md border border-red-900 px-2 py-1 text-sm text-red-300 disabled:opacity-40"
+          >
+            {deleting ? "Deleting…" : "Delete building"}
+          </button>
           <button onClick={onSignOut} className="rounded-md border border-zinc-800 px-2 py-1 text-sm">Sign out</button>
         </div>
       </header>
