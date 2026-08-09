@@ -36,7 +36,7 @@ struct SavedMapsView: View {
             if let error = session.error, session.isSignedIn {
                 Section {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.red)
+                        .font(.caption).foregroundStyle(Color.egEmergency)
                 }
             }
 
@@ -44,28 +44,30 @@ struct SavedMapsView: View {
             // from the list would look identical to never having saved it.
             if !repository.damagedZoneIDs.isEmpty {
                 Section {
-                    Label(
-                        "\(repository.damagedZoneIDs.count) saved map\(repository.damagedZoneIDs.count == 1 ? "" : "s") on this device could not be read. Their folders are still present, so nothing has been deleted.",
-                        systemImage: "exclamationmark.triangle.fill"
+                    EGBanner(
+                        title: "\(repository.damagedZoneIDs.count) saved map\(repository.damagedZoneIDs.count == 1 ? "" : "s") could not be read",
+                        detail: "Nothing has been deleted — the files are still on this device. Re-map the area to replace them.",
+                        tone: .caution
                     )
-                    .font(.caption).foregroundStyle(.orange)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                    #if DEBUG
                     ForEach(repository.damagedZoneIDs, id: \.self) { id in
                         Text(id.uuidString).font(.caption2.monospaced()).foregroundStyle(.secondary)
                     }
+                    #endif
                 }
             }
 
             Section {
                 if entries.isEmpty {
-                    ContentUnavailableView(
-                        "No Maps Yet",
-                        systemImage: "map",
-                        description: Text(
-                            session.canManage
-                            ? "Map a zone in Configure, or sign in to see buildings your organization published."
-                            : "No published buildings in your organization yet."
-                        )
+                    EGEmptyState(
+                        title: "No saved maps",
+                        message: session.canManage
+                            ? "Map a hallway or floor before starting navigation. Saved maps work with no network."
+                            : "Nothing has been published to your organization yet. Maps appear here once an administrator publishes one.",
+                        symbol: "map"
                     )
+                    .listRowBackground(Color.clear)
                 }
                 ForEach(entries) { entry in
                     SavedMapRow(entry: entry, profile: session.profile) { action in
@@ -197,18 +199,31 @@ private struct SavedMapRow: View {
 
     private var tint: Color {
         switch entry.availability {
-        case .offlineAvailable, .publishedByYou: return .green
-        case .updateAvailable: return .yellow
-        case .downloadFailed: return .red
-        case .downloading: return .blue
-        case .localDraft: return .orange
+        case .offlineAvailable, .publishedByYou: return .egSafe
+        case .updateAvailable: return .egCaution
+        case .downloadFailed: return .egEmergency
+        case .downloading: return .accentColor
+        case .localDraft: return .secondary
         case .downloadRequired: return .secondary
         }
     }
 
+    /// Availability is stated with a symbol as well as a colour.
+    private var availabilitySymbol: String {
+        switch entry.availability {
+        case .offlineAvailable: return "arrow.down.circle.fill"
+        case .publishedByYou: return "checkmark.seal.fill"
+        case .updateAvailable: return "arrow.triangle.2.circlepath"
+        case .downloadFailed: return "exclamationmark.triangle.fill"
+        case .downloading: return "arrow.down.circle"
+        case .localDraft: return "iphone"
+        case .downloadRequired: return "icloud.and.arrow.down"
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: EG.Space.s) {
+            HStack(spacing: EG.Space.m) {
                 Image(systemName: entry.isRemote ? "building.2.fill" : "map.fill")
                     .font(.title3)
                     .foregroundStyle(tint)
@@ -216,14 +231,18 @@ private struct SavedMapRow: View {
                     .background(tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(entry.name).font(.subheadline.weight(.semibold))
-                    Text(entry.subtitle).font(.caption).foregroundStyle(.secondary)
-                    HStack(spacing: 6) {
+                    Text(entry.name).font(.headline)
+                    Text(entry.subtitle).font(.subheadline).foregroundStyle(.secondary)
+                    HStack(spacing: EG.Space.xs) {
                         if case .downloading = entry.availability {
                             ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: availabilitySymbol)
                         }
-                        Text(entry.availability.label).font(.caption2).foregroundStyle(tint)
+                        Text(entry.availability.label)
                     }
+                    .font(.caption)
+                    .foregroundStyle(tint)
                 }
                 Spacer()
             }
@@ -244,26 +263,53 @@ private struct FlowActions: View {
     let actions: [BuildingAction]
     var perform: (BuildingAction) -> Void
 
+    /// Evacuating is never one of several equal chips — it gets its own full
+    /// width row above the administrative actions.
+    private var primary: BuildingAction? {
+        actions.first { $0 == .useInEmergency }
+    }
+
+    private var secondary: [BuildingAction] {
+        actions.filter { $0 != .useInEmergency }
+    }
+
+    /// Two per row: three chips truncated "Use in Emergency" and "Delete From
+    /// Device" at every Dynamic Type size.
     private var rows: [[BuildingAction]] {
-        stride(from: 0, to: actions.count, by: 3).map {
-            Array(actions[$0..<min($0 + 3, actions.count)])
+        stride(from: 0, to: secondary.count, by: 2).map {
+            Array(secondary[$0..<min($0 + 2, secondary.count)])
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: EG.Space.s) {
+            if let primary {
+                Button { perform(primary) } label: {
+                    Label(primary.label, systemImage: primary.symbolName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .tint(Color.egEmergency)
+            }
             ForEach(rows, id: \.self) { row in
-                HStack(spacing: 8) {
+                HStack(spacing: EG.Space.s) {
                     ForEach(row, id: \.self) { action in
                         Button { perform(action) } label: {
                             Label(action.label, systemImage: action.symbolName)
-                                .font(.caption2)
+                                .font(.caption)
                                 .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                                .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .tint(action == .useInEmergency ? .red : .accentColor)
+                        .tint(action == .deleteLocalMap || action == .deleteBuilding
+                              ? Color.egEmergency : .accentColor)
                     }
+                    if row.count == 1 { Spacer(minLength: 0) }
                 }
             }
         }

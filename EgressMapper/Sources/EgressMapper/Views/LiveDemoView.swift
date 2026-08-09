@@ -51,20 +51,18 @@ struct LiveDemoView: View {
     private var connectionSection: some View {
         Section {
             HStack {
-                Circle()
-                    .fill(service.connection == .live ? Color.green
-                          : service.connection == .error ? Color.red : Color.orange)
-                    .frame(width: 8, height: 8)
-                Text(service.connection.displayName)
+                EGStatusBadge(status: EGStatus(connection: service.connection), compact: true)
                 Spacer()
+                // Developer screen: the raw revision is genuinely useful here.
                 Text("rev \(service.revision)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+            .egAnimation(service.connection)
             if service.usingCache {
                 Label("Using cached data — live updates unavailable", systemImage: "wifi.slash")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Color.egCaution)
             }
             if let error {
                 Text(error).font(.caption).foregroundStyle(.red)
@@ -141,7 +139,7 @@ struct LiveDemoView: View {
             if let banner {
                 Label(banner, systemImage: "arrow.triangle.branch")
                     .font(.caption)
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(Color.egCaution)
             }
             if let route {
                 Text(route.destination.name).font(.title3.weight(.bold))
@@ -151,12 +149,14 @@ struct LiveDemoView: View {
                 if route.isRefugeFallback {
                     Label("No exit reachable — routing to an area of refuge.",
                           systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(Color.egCaution)
                 }
             } else if startNodeID != nil {
-                Text("No route available.").foregroundStyle(.orange)
+                Label("No safe route from here", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.egCaution)
             } else {
-                Text("Choose a start location.").foregroundStyle(.secondary)
+                Label("Choose a start location", systemImage: "mappin.and.ellipse")
+                    .foregroundStyle(.secondary)
             }
         } header: {
             Text("Current route")
@@ -301,6 +301,7 @@ struct LiveGraphMapView: View {
                                style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
             }
 
+            var labels = EGMapLabelLayout()
             for node in graph.nodes {
                 let p = t(node.mapPoint)
                 let r: CGFloat = node.id == startNodeID ? 9 : 6
@@ -308,8 +309,8 @@ struct LiveGraphMapView: View {
                 context.fill(Path(ellipseIn: rect),
                              with: .color(node.id == startNodeID ? .cyan : node.type.tint))
                 context.draw(
-                    Text(node.name).font(.system(size: 8, weight: .semibold)).foregroundStyle(.white),
-                    at: CGPoint(x: p.x, y: p.y - 13)
+                    Text(node.name).font(.system(size: 9, weight: .semibold)).foregroundStyle(.white),
+                    at: labels.position(for: node.name, at: p, fontSize: 9)
                 )
             }
         }

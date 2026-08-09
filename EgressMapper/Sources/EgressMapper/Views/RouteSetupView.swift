@@ -101,8 +101,8 @@ struct RouteSetupView: View {
     private var errorSection: some View {
         if let loadError {
             Section {
-                Label(loadError, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                EGBanner(title: "This map is incomplete", detail: loadError, tone: .caution)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
             }
         }
     }
@@ -200,8 +200,8 @@ struct RouteSetupView: View {
         if let calculated {
             Text("\(calculated.nodes.map(\.name).joined(separator: " → ")) · \(Int(calculated.totalDistanceMeters)) m")
         } else if start != nil && destination != nil {
-            Text(unroutableReason)
-                .foregroundStyle(.orange)
+            Label(unroutableReason, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color.egCaution)
         }
     }
 
@@ -221,12 +221,15 @@ struct RouteSetupView: View {
 
     private var launchSection: some View {
         Section {
+            // Route testing, not evacuation: the primary action here is
+            // deliberately neutral rather than emergency red.
             Button {
                 navigating = true
             } label: {
                 Label("Start AR Navigation", systemImage: "location.north.line.fill")
-                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(EGPrimaryButtonStyle(tone: .neutral))
+            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
             .disabled(route.count < 2 || !zone.hasWorldMap)
 
             Button {

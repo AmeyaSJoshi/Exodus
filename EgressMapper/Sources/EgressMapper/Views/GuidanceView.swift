@@ -43,11 +43,23 @@ struct GuidanceView: View {
     @State private var profile = NavigationProfile.standard
     @State private var showAccessibility = false
     @State private var rerouteNotice: String?
+    @State private var rerouteDetail: String?
     @State private var activeEdges: [RouteEdge] = []
     @State private var showHazardReport = false
     @State private var showVoiceReport = false
     @State private var showRecovery = false
+    @State private var showManualPicker = false
+    /// Set when the occupant places themselves on the map by hand because
+    /// relocalization could not find them. Guidance then runs from the 2D map:
+    /// no AR arrows, because the phone still does not know its own pose.
+    @State private var manualStart: RoutePosition?
     @State private var wasReliable = true
+    /// `onAppear` fires again every time this view is rebuilt behind its
+    /// presenter. Each `start()` restarted the AR session and threw away all
+    /// relocalization progress, so a session that was seconds from a match kept
+    /// being sent back to zero — which is why relocalization "never found you".
+    @State private var didStart = false
+    @State private var didSubscribe = false
     @AppStorage("voiceGuidanceEnabled") private var voiceEnabled = true
 
     init(
@@ -77,12 +89,17 @@ struct GuidanceView: View {
 
     private var relocalized: Bool { manager.didRelocalize }
 
+    /// Guidance is on screen once ARKit has relocalized *or* the occupant has
+    /// placed themselves manually. Manual placement used to drop them back to
+    /// the setup screen, which is why it never appeared to work.
+    private var guiding: Bool { relocalized || manualStart != nil }
+
     var body: some View {
         ZStack {
             ARViewContainer(manager: manager)
                 .ignoresSafeArea()
 
-            if !relocalized {
+            if !guiding {
                 relocalizationOverlay
             } else {
                 guidanceOverlay
@@ -146,10 +163,20 @@ struct GuidanceView: View {
             titleVisibility: .visible
         ) {
             Button("Relocalize") { restart() }
-            Button("Choose Location Manually") { stopAndExit() }
+            Button("Choose Location Manually") { showManualPicker = true }
             Button("Keep using the 2D map", role: .cancel) {}
         } message: {
             Text("AR guidance is paused because the phone no longer knows where it is. The route map below is still accurate.")
+        }
+        .sheet(isPresented: $showManualPicker) {
+            if let graph = repository.routableGraph(for: zone) {
+                ManualLocationPickerView(
+                    zone: zone, graph: graph, waypoints: allWaypoints, path: path
+                ) { position, _ in
+                    showManualPicker = false
+                    applyManualStart(position)
+                }
+            }
         }
         .sheet(isPresented: $showHazardReport) {
             if let graph = repository.routableGraph(for: zone) {
@@ -177,7 +204,7 @@ struct GuidanceView: View {
                 } onAccessibility: { change in
                     profile = change.apply(to: profile)
                 } onAlternativeExit: {
-                    reroute(for: profile, reason: "Finding another exit.")
+                    reroute(for: profile, reason: "Finding another exit")
                 } onClearReports: {
                     clearOwnReports()
                 }
@@ -196,29 +223,60 @@ struct GuidanceView: View {
     /// Recomputes the best exit under a changed profile and swaps the AR
     /// geometry. Old anchors are removed before new ones are added.
     private func reroute(for profile: NavigationProfile, reason: String? = nil) {
-        guard let context = rerouteContext else { return }
+        guard let start = manualStart ?? rerouteContext?.start else { return }
         guard let graph = currentEffectiveGraph() else {
             errorMessage = RoutingError.emptyGraph.localizedDescription
             return
         }
         do {
             let options = try ShortestPathService.findBestEgressRoute(
-                from: context.start, graph: graph, profile: profile
+                from: start, graph: graph, profile: profile
             )
             activeRoute = options.best.nodes
             activeEdges = options.best.edges
             engine = GuidanceEngine(route: options.best.nodes)
             lastTurnCueLeg = -1
             redrawRoute()
-            rerouteNotice = (reason.map { "\($0) " } ?? "") + "Rerouting to \(options.best.destination.name) — \(Int(options.best.totalDistanceMeters.rounded())) m."
+            rerouteNotice = reason ?? "Your route changed"
+            rerouteDetail = "Rerouting to \(options.best.destination.name) — \(Int(options.best.totalDistanceMeters.rounded())) m"
             announcer.say("Your route has changed. Proceed to \(options.best.destination.name).", force: true)
             announcer.turnCue()
             DiagnosticsLog.shared.log("Rerouted: \(options.summary)")
         } catch {
             // Never silently ignore an accessibility preference.
             rerouteNotice = nil
+            rerouteDetail = nil
             errorMessage = error.localizedDescription
             DiagnosticsLog.shared.log("Reroute failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Commits a hand-placed position and puts guidance on screen. AR arrows
+    /// stay hidden — the phone still has no pose — but the route, the step
+    /// distances and the top-down map are all live from here.
+    private func applyManualStart(_ position: RoutePosition) {
+        manualStart = position
+        lastTurnCueLeg = -1
+        guard let graph = currentEffectiveGraph() else {
+            errorMessage = RoutingError.emptyGraph.localizedDescription
+            return
+        }
+        do {
+            let options = try ShortestPathService.findBestEgressRoute(
+                from: position, graph: graph, profile: profile
+            )
+            activeRoute = options.best.nodes
+            activeEdges = options.best.edges
+            engine = GuidanceEngine(route: options.best.nodes)
+            rerouteNotice = "Location set manually"
+            rerouteDetail = "Proceed to \(options.best.destination.name) — \(Int(options.best.totalDistanceMeters.rounded())) m"
+            announcer.say(
+                "Location set. Proceed to \(options.best.destination.name).", force: true
+            )
+            DiagnosticsLog.shared.log("Manual start accepted: \(options.summary)")
+        } catch {
+            errorMessage = error.localizedDescription
+            DiagnosticsLog.shared.log("Manual start failed: \(error.localizedDescription)")
         }
     }
 
@@ -233,9 +291,10 @@ struct GuidanceView: View {
         try? repository.store.clearHazards(zone.id)
         DiagnosticsLog.shared.log("Cleared this device's hazard reports for zone \(zone.id)")
         errorMessage = nil
-        rerouteNotice = "Your reports were cleared. Looking for a route again."
+        rerouteNotice = "Your reports were cleared"
+        rerouteDetail = "Looking for a route again."
         announcer.say("Reports cleared. Recalculating.", force: true)
-        reroute(for: profile, reason: "Reports cleared.")
+        reroute(for: profile, reason: "Reports cleared")
     }
 
     /// Persists the hazard next to (not inside) the permanent graph, then
@@ -246,7 +305,7 @@ struct GuidanceView: View {
         try? repository.store.saveHazards(active, zoneID: zone.id)
         DiagnosticsLog.shared.log("Hazard \(hazard.type.rawValue) on edge \(edgeID)")
         announcer.arrivalCue()
-        reroute(for: profile, reason: "\(hazard.type.displayName).")
+        reroute(for: profile, reason: "\(hazard.type.displayName) reported")
     }
 
     /// Local graph with local hazards, then the administrator's live state on
@@ -283,168 +342,145 @@ struct GuidanceView: View {
     // MARK: - Relocalization
 
     private var relocalizationOverlay: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: EG.Space.l) {
             Spacer()
-            VStack(spacing: 12) {
-                ProgressView().tint(.white)
-                Text("Relocalizing…")
-                    .font(.headline)
-                Text("Stand near where mapping began and pan the phone slowly across the same view.")
-                    .font(.subheadline)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
+            VStack(spacing: EG.Space.m) {
+                EGLoadingState(
+                    title: "Finding your location…",
+                    detail: "Stand near where mapping began and pan the phone slowly across the same view."
+                )
 
                 if let referenceImage {
                     Image(uiImage: referenceImage)
                         .resizable()
                         .scaledToFit()
                         .frame(maxHeight: 190)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .clipShape(RoundedRectangle(cornerRadius: EG.Radius.card))
                         .overlay(alignment: .bottom) {
                             Text("Reference view from mapping")
                                 .font(.caption2)
-                                .padding(4)
+                                .padding(EG.Space.xs)
                                 .background(.black.opacity(0.6), in: Capsule())
-                                .padding(6)
+                                .padding(EG.Space.xs)
                         }
+                        .accessibilityLabel("Reference photo taken when this area was mapped")
                 }
 
-                Text(manager.status.trackingText)
-                    .font(.caption)
                 if let advice = manager.status.advice {
-                    Text(advice).font(.caption2).foregroundStyle(.yellow)
+                    Text(advice)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.egCaution)
                         .multilineTextAlignment(.center)
                 }
-                Text("\(manager.relocalizationSeconds)s elapsed")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
 
                 if manager.relocalizationSeconds > 25 {
-                    Text("This environment may look different from when it was mapped — lighting, decorations or furniture changes all reduce the chance of a match.")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
+                    Text("This space may look different from when it was mapped. Lighting, decorations and furniture all reduce the chance of a match.")
+                        .font(.caption)
+                        .foregroundStyle(Color.egCaution)
                         .multilineTextAlignment(.center)
                 }
-            }
-            .padding(20)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
 
-            HStack(spacing: 12) {
+                #if DEBUG
+                Text("\(manager.status.trackingText) · \(manager.relocalizationSeconds)s")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                #endif
+            }
+            .padding(EG.Space.l)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: EG.Radius.prominent))
+
+            HStack(spacing: EG.Space.m) {
                 Button("Cancel") { stopAndExit() }
                     .buttonStyle(.bordered)
-                Button("Retry") { restart() }
+                    .frame(minHeight: EG.minTarget)
+                Button("Try Again") { restart() }
                     .buttonStyle(.borderedProminent)
-                    .tint(.green)
+                    .frame(minHeight: EG.minTarget)
             }
+            // Always reachable: relocalization is an optimisation, and someone
+            // evacuating cannot be made to wait for it.
+            Button {
+                showManualPicker = true
+            } label: {
+                Label("Set My Location Manually", systemImage: "hand.tap")
+            }
+            .buttonStyle(EGPrimaryButtonStyle(tone: .neutral))
             Spacer()
         }
-        .padding(20)
-        .background(Color.black.opacity(0.35).ignoresSafeArea())
+        .padding(EG.Space.l)
+        .background(Color.black.opacity(0.45).ignoresSafeArea())
     }
 
     // MARK: - Guidance
 
     private var guidanceOverlay: some View {
-        VStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text(update?.instruction ?? "Follow the arrows.")
-                        .font(.headline)
-                    Spacer()
-                    Button {
-                        voiceEnabled.toggle()
-                    } label: {
-                        Image(systemName: voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                            .foregroundStyle(voiceEnabled ? .green : .secondary)
-                    }
-                    .accessibilityLabel(voiceEnabled ? "Turn voice off" : "Turn voice on")
-                    Button {
-                        callEmergencyServices()
-                    } label: {
-                        Image(systemName: "phone.fill").foregroundStyle(.red)
-                    }
-                    .accessibilityLabel("Call emergency services")
-                    Button("End") { stopAndExit() }
-                        .font(.caption)
-                }
-                if let update, !update.arrived {
-                    HStack(spacing: 14) {
-                        Label(String(format: "%.0f m to %@", update.distanceToNext, update.nextNode?.name ?? "next"),
-                              systemImage: "arrow.forward")
-                        Label(String(format: "%.0f m total", update.remainingDistance), systemImage: "flag.checkered")
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                Text(manager.status.trackingText)
-                    .font(.caption2)
-                    .foregroundStyle(manager.status.isReliable ? .green : .orange)
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        VStack(spacing: EG.Space.s) {
+            instructionCard
 
-            if !manager.status.isReliable {
-                Label(
-                    manager.status.advice ?? "Tracking degraded — AR arrows hidden. Use the map below.",
-                    systemImage: "eye.trianglebadge.exclamationmark"
+            if !manager.status.isReliable && manualStart == nil {
+                EGBanner(
+                    title: EGStatus.trackingLimited.title,
+                    detail: manager.status.advice ?? "AR arrows are hidden until the phone knows where it is. The map below is still accurate.",
+                    tone: .caution,
+                    symbol: EGStatus.trackingLimited.symbol
                 )
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+                .modifier(EGTransition())
             }
 
             if let rerouteNotice {
-                Label(rerouteNotice, systemImage: "arrow.triangle.branch")
-                    .font(.caption)
-                    .foregroundStyle(.yellow)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+                EGBanner(
+                    title: rerouteNotice,
+                    detail: rerouteDetail,
+                    tone: .caution,
+                    symbol: "arrow.triangle.branch",
+                    onDismiss: { self.rerouteNotice = nil; self.rerouteDetail = nil }
+                )
+                .modifier(EGTransition())
             }
 
             Spacer()
 
-            if rerouteContext != nil {
-                HStack(spacing: 8) {
-                Button {
-                    showHazardReport = true
-                } label: {
-                    Label("Report a Problem", systemImage: "exclamationmark.triangle.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
+            if rerouteContext != nil || manualStart != nil {
+                HStack(spacing: EG.Space.s) {
+                    Button {
+                        showHazardReport = true
+                    } label: {
+                        Label("Report a Problem", systemImage: "exclamationmark.triangle.fill")
+                    }
+                    .buttonStyle(EGPrimaryButtonStyle(tone: .caution))
+
+                    Button {
+                        showVoiceReport = true
+                    } label: {
+                        Image(systemName: "mic.fill")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                            .frame(width: EG.minTarget + 10, height: EG.minTarget + 10)
+                            .background(
+                                Color.accentColor,
+                                in: RoundedRectangle(cornerRadius: EG.Radius.control)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Report a problem by voice")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
 
                 Button {
-                    showVoiceReport = true
+                    showAccessibility = true
                 } label: {
-                    Image(systemName: "mic.fill")
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 14)
+                    Label("I Need an Accessible Route", systemImage: "figure.roll")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
-                .accessibilityLabel("Report a problem by voice")
-                }
-            }
+                .buttonStyle(EGPrimaryButtonStyle(tone: .neutral))
 
-            Button {
-                showAccessibility = true
-            } label: {
-                Label("I Need an Accessible Route", systemImage: "figure.roll")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
+                if !relocalized {
+                    Button {
+                        showManualPicker = true
+                    } label: {
+                        Label("Move My Location", systemImage: "hand.tap")
+                    }
+                    .buttonStyle(EGSecondaryButtonStyle())
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.blue)
-            .opacity(rerouteContext == nil ? 0 : 1)
-            .disabled(rerouteContext == nil)
 
             HeightControlView(manager: manager)
             DebugOverlayView(
@@ -472,17 +508,122 @@ struct GuidanceView: View {
                 highlightedRoute: activeRoute
             )
             .frame(height: 200)
+            .clipShape(RoundedRectangle(cornerRadius: EG.Radius.card))
+            .accessibilityLabel("Overhead map of your route")
         }
-        .padding(12)
+        .padding(EG.Space.m)
+        .egAnimation(rerouteNotice)
+        .egAnimation(manager.status.isReliable)
+        .egAnimation(activeRoute.last?.id)
         // Hide precise AR geometry when ARKit is not confident.
         .onChange(of: manager.status.isReliable) { _, reliable in
             manager.arView.scene.anchors.forEach { $0.isEnabled = reliable }
         }
     }
 
+    /// The one thing someone reads while moving: what to do next, how far, and
+    /// where they are heading. Everything else on screen is subordinate.
+    private var instructionCard: some View {
+        VStack(alignment: .leading, spacing: EG.Space.s) {
+            HStack(alignment: .top, spacing: EG.Space.s) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(destinationLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(instructionText)
+                        .font(.title3.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                controlCluster
+            }
+
+            if let update, !update.arrived {
+                HStack(spacing: EG.Space.l) {
+                    Label(
+                        String(format: "%.0f m to %@", update.distanceToNext, update.nextNode?.name ?? "next point"),
+                        systemImage: "arrow.forward"
+                    )
+                    Label(
+                        String(format: "%.0f m remaining", update.remainingDistance),
+                        systemImage: "flag.checkered"
+                    )
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+            } else if update?.arrived == true {
+                EGStatusBadge(status: .exitReached, compact: true)
+            }
+
+            EGStatusBadge(status: positionStatus, compact: true)
+        }
+        .padding(EG.Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: EG.Radius.card))
+    }
+
+    /// Without a relocalized pose there is no live `update`, so name the next
+    /// point from the route itself rather than telling someone to follow arrows
+    /// that are deliberately not drawn.
+    private var instructionText: String {
+        if let update { return update.instruction }
+        if manualStart != nil, activeRoute.count > 1 {
+            return "Head to \(activeRoute[1].name)"
+        }
+        return "Follow the arrows."
+    }
+
+    private var destinationLabel: String {
+        activeRoute.last.map { "Evacuating to \($0.name)" } ?? "Evacuating"
+    }
+
+    /// What the app actually knows about where the user is.
+    private var positionStatus: EGStatus {
+        if !relocalized && manualStart != nil {
+            return .custom("Location set manually", "hand.tap.fill", .caution)
+        }
+        return manager.status.isReliable ? .locationFound : .trackingLimited
+    }
+
+    /// Icon-only controls: voice, emergency call, and ending navigation. Each
+    /// carries its own VoiceOver label and a full-size tap target.
+    private var controlCluster: some View {
+        HStack(spacing: EG.Space.xs) {
+            Button {
+                voiceEnabled.toggle()
+            } label: {
+                Image(systemName: voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                    .foregroundStyle(voiceEnabled ? Color.egSafe : .secondary)
+                    .frame(width: EG.minTarget, height: EG.minTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(voiceEnabled ? "Turn voice guidance off" : "Turn voice guidance on")
+
+            Button {
+                callEmergencyServices()
+            } label: {
+                Image(systemName: "phone.fill")
+                    .foregroundStyle(Color.egEmergency)
+                    .frame(width: EG.minTarget, height: EG.minTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Call emergency services")
+
+            Button("End") { stopAndExit() }
+                .font(.subheadline.weight(.medium))
+                .frame(minWidth: EG.minTarget, minHeight: EG.minTarget)
+                .accessibilityLabel("End navigation")
+        }
+    }
+
     // MARK: - Actions
 
     private func start() {
+        guard !didStart else { return }
+        didStart = true
         announcer.isEnabled = voiceEnabled
         profile = repository.store.loadProfile()
         announcer.configureAudioSession()
@@ -515,6 +656,7 @@ struct GuidanceView: View {
     }
 
     private func restart() {
+        didStart = false
         didRenderRoute = false
         engine = GuidanceEngine(route: activeRoute)
         start()
@@ -532,7 +674,9 @@ struct GuidanceView: View {
     /// Administrator blocks arrive here and take the same path as any other
     /// reroute: old anchors are torn down before the replacement is drawn.
     private func startLiveUpdates() {
+        guard !didSubscribe else { return }
         guard let liveService, let buildingID = zone.remoteBuildingID else { return }
+        didSubscribe = true
         liveService.onStateChanged = { changed in
             Task { @MainActor in
                 guard let permanent = repository.routableGraph(for: zone) else { return }
@@ -547,7 +691,7 @@ struct GuidanceView: View {
                     activeEdges.contains { overlay.blockedEdgeIDs().contains($0.id) }
                 } ?? false
                 if affected || changed?.status == .available {
-                    reroute(for: profile, reason: "\(name) was blocked by an administrator.")
+                    reroute(for: profile, reason: "\(name) unavailable")
                 }
             }
         }

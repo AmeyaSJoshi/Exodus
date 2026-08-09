@@ -44,6 +44,7 @@ struct TopDownRouteView: View {
             }
 
             // Waypoints
+            var labels = EGMapLabelLayout()
             for w in waypoints {
                 let p = transform(w.mapPoint)
                 let r: CGFloat = 7
@@ -53,7 +54,7 @@ struct TopDownRouteView: View {
 
                 context.draw(
                     Text(w.name).font(.system(size: 9, weight: .semibold)).foregroundStyle(.white),
-                    at: CGPoint(x: p.x, y: p.y - 14)
+                    at: labels.position(for: w.name, at: p, fontSize: 9)
                 )
             }
 
