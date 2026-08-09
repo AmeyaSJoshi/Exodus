@@ -15,20 +15,20 @@ struct GuidanceEngine {
 
     struct Update: Equatable {
         var legIndex: Int
-        var nextWaypoint: Waypoint?
+        var nextNode: RouteNode?
         var distanceToNext: Double
         var remainingDistance: Double
         var instruction: String
         var arrived: Bool
     }
 
-    let route: [Waypoint]
+    let route: [RouteNode]
     /// How close counts as "reached this waypoint".
     var arrivalRadius: Double = 1.5
 
     private(set) var legIndex: Int = 0
 
-    init(route: [Waypoint], arrivalRadius: Double = 1.5) {
+    init(route: [RouteNode], arrivalRadius: Double = 1.5) {
         self.route = route
         self.arrivalRadius = arrivalRadius
     }
@@ -38,7 +38,7 @@ struct GuidanceEngine {
     /// Advances the leg cursor if the user has reached the next waypoint.
     mutating func update(position: SIMD3<Float>) -> Update {
         guard !route.isEmpty else {
-            return Update(legIndex: 0, nextWaypoint: nil, distanceToNext: 0,
+            return Update(legIndex: 0, nextNode: nil, distanceToNext: 0,
                           remainingDistance: 0, instruction: "No route.", arrived: false)
         }
 
@@ -57,7 +57,7 @@ struct GuidanceEngine {
         if arrived {
             return Update(
                 legIndex: legIndex,
-                nextWaypoint: route.last,
+                nextNode: route.last,
                 distanceToNext: 0,
                 remainingDistance: 0,
                 instruction: "\(route.last?.name ?? "Destination") reached.",
@@ -71,7 +71,7 @@ struct GuidanceEngine {
 
         return Update(
             legIndex: legIndex,
-            nextWaypoint: next,
+            nextNode: next,
             distanceToNext: distance,
             remainingDistance: remaining,
             instruction: Self.instruction(for: route, legIndex: legIndex, distance: distance),
@@ -79,7 +79,7 @@ struct GuidanceEngine {
         )
     }
 
-    static func pathLength(_ waypoints: [Waypoint]) -> Double {
+    static func pathLength(_ waypoints: [RouteNode]) -> Double {
         guard waypoints.count > 1 else { return 0 }
         var sum = 0.0
         for i in 1..<waypoints.count {
@@ -88,7 +88,7 @@ struct GuidanceEngine {
         return sum
     }
 
-    static func instruction(for route: [Waypoint], legIndex: Int, distance: Double) -> String {
+    static func instruction(for route: [RouteNode], legIndex: Int, distance: Double) -> String {
         guard legIndex + 1 < route.count else { return "Destination reached." }
         let next = route[legIndex + 1]
         let metres = Int(distance.rounded())
@@ -111,13 +111,15 @@ struct GuidanceEngine {
         return "Continue \(metres) m to \(next.name)."
     }
 
-    static func destinationPhrase(_ w: Waypoint) -> String {
+    static func destinationPhrase(_ w: RouteNode) -> String {
         switch w.type {
         case .exit: return "Exit ahead — \(w.name)."
         case .stairwell: return "Proceed to \(w.name)."
         case .elevator: return "Proceed to \(w.name)."
-        case .intersection: return "At \(w.name)."
+        case .intersection, .hallwayPoint: return "At \(w.name)."
         case .room: return "Arrive at \(w.name)."
+        case .refugeArea: return "Shelter at \(w.name) — this is an area of refuge."
+        case .temporaryStart: return "Continue from your location."
         }
     }
 

@@ -7,10 +7,18 @@ import RealityKit
 /// than no arrow.
 struct GuidanceView: View {
     let zone: MappingZone
-    let route: [Waypoint]
+    let route: [RouteNode]
     let path: RoutePath
     let allWaypoints: [Waypoint]
+    /// Supplied by Emergency mode so accessibility changes can reroute live.
+    var rerouteContext: RerouteContext?
     var onExit: () -> Void
+
+    /// Everything needed to recompute a route without leaving navigation.
+    struct RerouteContext {
+        var graph: BuildingGraph
+        var start: RoutePosition
+    }
 
     @Environment(ZoneRepository.self) private var repository
     @State private var manager = ARSessionManager()
@@ -22,21 +30,28 @@ struct GuidanceView: View {
     @State private var referenceImage: UIImage?
     @State private var lastTurnCueLeg = -1
     @State private var routeAnchors: [AnchorEntity] = []
+    @State private var activeRoute: [RouteNode] = []
+    @State private var profile = NavigationProfile.standard
+    @State private var showAccessibility = false
+    @State private var rerouteNotice: String?
     @AppStorage("voiceGuidanceEnabled") private var voiceEnabled = true
 
     init(
         zone: MappingZone,
-        route: [Waypoint],
+        route: [RouteNode],
         path: RoutePath,
         allWaypoints: [Waypoint],
+        rerouteContext: RerouteContext? = nil,
         onExit: @escaping () -> Void
     ) {
         self.zone = zone
         self.route = route
         self.path = path
         self.allWaypoints = allWaypoints
+        self.rerouteContext = rerouteContext
         self.onExit = onExit
         _engine = State(initialValue: GuidanceEngine(route: route))
+        _activeRoute = State(initialValue: route)
     }
 
     private var relocalized: Bool { manager.didRelocalize }
@@ -64,7 +79,7 @@ struct GuidanceView: View {
             if !didRenderRoute {
                 didRenderRoute = true
                 redrawRoute()
-                announcer.say("Route ready. \(route.first?.name ?? "") to \(route.last?.name ?? "").", force: true)
+                announcer.say("Route ready. \(activeRoute.first?.name ?? "") to \(activeRoute.last?.name ?? "").", force: true)
             }
             let next = engine.update(position: position)
             update = next
@@ -78,13 +93,45 @@ struct GuidanceView: View {
         .onChange(of: manager.heightMode) { _, _ in redrawRoute() }
         .onChange(of: manager.heightOffset) { _, _ in redrawRoute() }
         .onChange(of: manager.estimatedFloorY) { _, _ in redrawRoute() }
+        .sheet(isPresented: $showAccessibility) {
+            AccessibilitySheet(profile: $profile)
+                .presentationDetents([.height(330)])
+        }
+        .onChange(of: profile) { _, updated in
+            try? repository.store.saveProfile(updated)
+            reroute(for: updated)
+        }
+    }
+
+    /// Recomputes the best exit under a changed profile and swaps the AR
+    /// geometry. Old anchors are removed before new ones are added.
+    private func reroute(for profile: NavigationProfile) {
+        guard let context = rerouteContext else { return }
+        do {
+            let options = try ShortestPathService.findBestEgressRoute(
+                from: context.start, graph: context.graph, profile: profile
+            )
+            activeRoute = options.best.nodes
+            engine = GuidanceEngine(route: options.best.nodes)
+            lastTurnCueLeg = -1
+            redrawRoute()
+            rerouteNotice = "Your route has changed. \(options.best.destination.name) — \(Int(options.best.totalDistanceMeters.rounded())) m."
+            announcer.say("Your route has changed. Proceed to \(options.best.destination.name).", force: true)
+            announcer.turnCue()
+            DiagnosticsLog.shared.log("Rerouted: \(options.summary)")
+        } catch {
+            // Never silently ignore an accessibility preference.
+            rerouteNotice = nil
+            errorMessage = error.localizedDescription
+            DiagnosticsLog.shared.log("Reroute failed: \(error.localizedDescription)")
+        }
     }
 
     private func redrawRoute() {
         guard didRenderRoute || relocalized else { return }
         for anchor in routeAnchors { manager.arView.scene.removeAnchor(anchor) }
         routeAnchors = ARRouteRenderer.renderRoute(
-            route,
+            activeRoute,
             in: manager.arView,
             groundY: manager.estimatedFloorY,
             mode: manager.heightMode,
@@ -175,7 +222,7 @@ struct GuidanceView: View {
                 }
                 if let update, !update.arrived {
                     HStack(spacing: 14) {
-                        Label(String(format: "%.0f m to %@", update.distanceToNext, update.nextWaypoint?.name ?? "next"),
+                        Label(String(format: "%.0f m to %@", update.distanceToNext, update.nextNode?.name ?? "next"),
                               systemImage: "arrow.forward")
                         Label(String(format: "%.0f m total", update.remainingDistance), systemImage: "flag.checkered")
                     }
@@ -202,12 +249,34 @@ struct GuidanceView: View {
                 .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
             }
 
+            if let rerouteNotice {
+                Label(rerouteNotice, systemImage: "arrow.triangle.branch")
+                    .font(.caption)
+                    .foregroundStyle(.yellow)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+            }
+
             Spacer()
+
+            Button {
+                showAccessibility = true
+            } label: {
+                Label("I Need an Accessible Route", systemImage: "figure.roll")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .opacity(rerouteContext == nil ? 0 : 1)
+            .disabled(rerouteContext == nil)
 
             HeightControlView(manager: manager)
             DebugOverlayView(
                 manager: manager,
-                routeNode: update?.nextWaypoint?.name,
+                routeNode: update?.nextNode?.name,
                 distanceToNext: update?.distanceToNext
             )
 
@@ -216,7 +285,7 @@ struct GuidanceView: View {
                 waypoints: allWaypoints,
                 currentPosition: MapPoint(projecting: manager.cameraPosition),
                 currentHeading: manager.cameraHeading,
-                highlightedRoute: route
+                highlightedRoute: activeRoute
             )
             .frame(height: 200)
         }
@@ -231,6 +300,7 @@ struct GuidanceView: View {
 
     private func start() {
         announcer.isEnabled = voiceEnabled
+        profile = repository.store.loadProfile()
         announcer.configureAudioSession()
         referenceImage = repository.store.loadReferenceImage(zone.id)
         do {
@@ -243,7 +313,7 @@ struct GuidanceView: View {
 
     private func restart() {
         didRenderRoute = false
-        engine = GuidanceEngine(route: route)
+        engine = GuidanceEngine(route: activeRoute)
         start()
     }
 

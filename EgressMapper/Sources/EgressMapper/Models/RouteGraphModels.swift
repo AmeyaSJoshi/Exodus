@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import simd
 
 // MARK: - Nodes
@@ -29,6 +30,42 @@ enum RouteNodeType: String, Codable, CaseIterable, Hashable {
         case .exit: return "Exit"
         case .refugeArea: return "Area of Refuge"
         case .temporaryStart: return "Your Location"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .room: return "door.left.hand.closed"
+        case .intersection, .hallwayPoint: return "arrow.triangle.branch"
+        case .stairwell: return "figure.stairs"
+        case .elevator: return "arrow.up.arrow.down.square"
+        case .exit: return "figure.run.square.stack"
+        case .refugeArea: return "shield.lefthalf.filled"
+        case .temporaryStart: return "location.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .room: return .blue
+        case .intersection, .hallwayPoint: return .orange
+        case .stairwell: return .purple
+        case .elevator: return .teal
+        case .exit: return .green
+        case .refugeArea: return .mint
+        case .temporaryStart: return .cyan
+        }
+    }
+
+    var uiColor: UIColor {
+        switch self {
+        case .room: return .systemBlue
+        case .intersection, .hallwayPoint: return .systemOrange
+        case .stairwell: return .systemPurple
+        case .elevator: return .systemTeal
+        case .exit: return .systemGreen
+        case .refugeArea: return .systemMint
+        case .temporaryStart: return .systemCyan
         }
     }
 
