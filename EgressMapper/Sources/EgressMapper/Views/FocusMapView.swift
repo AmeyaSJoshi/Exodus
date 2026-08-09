@@ -89,8 +89,11 @@ struct FocusMapLoader: View {
         FocusMapView(building: building, graph: graph)
             .task {
                 guard graph == nil else { return }
-                try? await session.service.loadGraph(for: building)
-                graph = session.service.graph
+                // The loaded graph comes from this call, not from the service's
+                // shared `graph`: that single slot is overwritten by whichever
+                // load finishes last, so reading it back can hand this screen
+                // another building's map.
+                graph = try? await session.service.loadGraph(for: building)
             }
     }
 }

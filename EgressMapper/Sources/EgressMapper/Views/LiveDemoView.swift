@@ -197,9 +197,12 @@ struct LiveDemoView: View {
         route = nil
         banner = nil
         do {
-            try await service.loadGraph(for: b)
-            startNodeID = service.graph?.nodes.first(where: { $0.type == .room })?.id
-                ?? service.graph?.nodes.first?.id
+            // Pick the start node out of the graph this call returned, not the
+            // service's shared slot, which a concurrent load could have
+            // replaced with a different building's map.
+            let loaded = try await service.loadGraph(for: b)
+            startNodeID = loaded.nodes.first(where: { $0.type == .room })?.id
+                ?? loaded.nodes.first?.id
 
             // React to live changes using the same routing engine as AR mode.
             service.onStateChanged = { changed in

@@ -179,14 +179,21 @@ final class SupabaseBuildingService: BuildingStateService {
 
     /// Downloads the published graph and caches it. On failure, falls back to
     /// the cached copy so the app still works offline.
-    func loadGraph(for building: RemoteBuilding) async throws {
+    ///
+    /// Returns the graph it loaded. The service also holds it in `graph` for
+    /// the screens built around that, but a caller that opens a specific
+    /// building must use the return value: two loads in flight at once both
+    /// write `graph`, and the slower one wins regardless of which building the
+    /// user is actually looking at.
+    @discardableResult
+    func loadGraph(for building: RemoteBuilding) async throws -> BuildingGraph {
         currentBuildingID = building.id
         guard let client else { throw BackendError.notConfigured }
         guard let mapVersion = building.activeMapVersionID else {
             if let cached = cache.loadGraph(buildingID: building.id) {
                 graph = cached
                 usingCache = true
-                return
+                return cached
             }
             throw BackendError.noPublishedMap
         }
@@ -209,12 +216,14 @@ final class SupabaseBuildingService: BuildingStateService {
             if let match = catalog.first(where: { $0.id == building.id }) {
                 markCached(buildingID: building.id, version: match.version)
             }
+            return built
         } catch {
             // Offline: keep going on cached data rather than failing the user.
             if let cached = cache.loadGraph(buildingID: building.id) {
                 graph = cached
                 usingCache = true
                 lastError = "Using cached map — \(error.localizedDescription)"
+                return cached
             } else {
                 throw error
             }
