@@ -17,6 +17,8 @@ struct RouteSetupView: View {
     @State private var routeError: String?
     @State private var navigating = false
     @State private var aligningFloorPlan = false
+    @State private var publishing = false
+    @State private var liveService = SupabaseBuildingService()
 
     /// The router's chosen path, as graph nodes.
     private var route: [RouteNode] { calculated?.nodes ?? [] }
@@ -57,10 +59,24 @@ struct RouteSetupView: View {
         .navigationBarTitleDisplayMode(.inline)
         .fullScreenCover(isPresented: $navigating) {
             if !route.isEmpty {
-                GuidanceView(zone: zone, route: route, path: path, allWaypoints: waypoints) {
+                GuidanceView(
+                    zone: zone,
+                    route: route,
+                    path: path,
+                    allWaypoints: waypoints,
+                    routeEdges: calculated?.edges ?? [],
+                    rerouteContext: startPosition.map { .init(start: $0) },
+                    liveService: zone.remoteBuildingID == nil ? nil : liveService
+                ) {
                     navigating = false
                 }
                 .environment(repository)
+            }
+        }
+        .sheet(isPresented: $publishing) {
+            if let graph {
+                PublishMapView(zone: zone, graph: graph) { _ in load() }
+                    .environment(repository)
             }
         }
         .sheet(isPresented: $aligningFloorPlan) {
@@ -201,6 +217,17 @@ struct RouteSetupView: View {
                     .frame(maxWidth: .infinity)
             }
             .disabled(route.count < 2 || !zone.hasWorldMap)
+
+            Button {
+                publishing = true
+            } label: {
+                Label(
+                    zone.remoteBuildingID == nil ? "Publish Building Map" : "Publish New Map Version",
+                    systemImage: "icloud.and.arrow.up"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .disabled(graph == nil)
 
             Button {
                 aligningFloorPlan = true

@@ -14,6 +14,8 @@ struct GuidanceView: View {
     var routeEdges: [RouteEdge] = []
     /// Supplied by Emergency mode so accessibility changes can reroute live.
     var rerouteContext: RerouteContext?
+    /// Set when this zone is published, so administrator blocks reach AR.
+    var liveService: SupabaseBuildingService?
     var onExit: () -> Void
 
     /// Everything needed to recompute a route without leaving navigation.
@@ -50,6 +52,7 @@ struct GuidanceView: View {
         allWaypoints: [Waypoint],
         routeEdges: [RouteEdge] = [],
         rerouteContext: RerouteContext? = nil,
+        liveService: SupabaseBuildingService? = nil,
         onExit: @escaping () -> Void
     ) {
         self.zone = zone
@@ -58,6 +61,7 @@ struct GuidanceView: View {
         self.allWaypoints = allWaypoints
         self.routeEdges = routeEdges
         self.rerouteContext = rerouteContext
+        self.liveService = liveService
         self.onExit = onExit
         _engine = State(initialValue: GuidanceEngine(route: route))
         _activeRoute = State(initialValue: route)
@@ -83,7 +87,12 @@ struct GuidanceView: View {
             Text(errorMessage ?? "")
         }
         .onAppear(perform: start)
-        .onDisappear { announcer.stop(); manager.stop() }
+        .onAppear(perform: startLiveUpdates)
+        .onDisappear {
+            announcer.stop()
+            manager.stop()
+            Task { await liveService?.stopSubscription() }
+        }
         .onChange(of: manager.cameraPosition) { _, position in
             guard relocalized else { return }
             if !didRenderRoute {
@@ -171,7 +180,7 @@ struct GuidanceView: View {
     /// geometry. Old anchors are removed before new ones are added.
     private func reroute(for profile: NavigationProfile, reason: String? = nil) {
         guard let context = rerouteContext else { return }
-        guard let graph = repository.routableGraph(for: zone) else {
+        guard let graph = currentEffectiveGraph() else {
             errorMessage = RoutingError.emptyGraph.localizedDescription
             return
         }
@@ -205,6 +214,14 @@ struct GuidanceView: View {
         DiagnosticsLog.shared.log("Hazard \(hazard.type.rawValue) on edge \(edgeID)")
         announcer.arrivalCue()
         reroute(for: profile, reason: "\(hazard.type.displayName).")
+    }
+
+    /// Local graph with local hazards, then the administrator's live state on
+    /// top. Neither layer mutates the stored graph.
+    private func currentEffectiveGraph() -> BuildingGraph? {
+        guard let base = repository.routableGraph(for: zone) else { return nil }
+        guard let overlay = liveService?.overlay else { return base }
+        return overlay.effectiveGraph(from: base)
     }
 
     private func redrawRoute() {
@@ -458,6 +475,31 @@ struct GuidanceView: View {
             return
         }
         UIApplication.shared.open(url)
+    }
+
+    /// Administrator blocks arrive here and take the same path as any other
+    /// reroute: old anchors are torn down before the replacement is drawn.
+    private func startLiveUpdates() {
+        guard let liveService, let buildingID = zone.remoteBuildingID else { return }
+        liveService.onStateChanged = { changed in
+            Task { @MainActor in
+                guard let permanent = repository.routableGraph(for: zone) else { return }
+                var name = "A route segment"
+                if let changed, let edge = permanent.edge(changed.edgeStableID) {
+                    let a = permanent.node(edge.fromNodeID)?.name ?? "here"
+                    let b = permanent.node(edge.toNodeID)?.name ?? "the next point"
+                    name = "\(a) → \(b)"
+                }
+                // Only disturb the user when their own route is affected.
+                let affected = liveService.overlay.map { overlay in
+                    activeEdges.contains { overlay.blockedEdgeIDs().contains($0.id) }
+                } ?? false
+                if affected || changed?.status == .available {
+                    reroute(for: profile, reason: "\(name) was blocked by an administrator.")
+                }
+            }
+        }
+        Task { try? await liveService.subscribe(buildingID: buildingID) }
     }
 
     private func stopAndExit() {

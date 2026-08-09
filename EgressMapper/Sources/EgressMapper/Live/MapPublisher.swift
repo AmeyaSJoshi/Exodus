@@ -1,0 +1,180 @@
+import Foundation
+import Supabase
+
+/// Uploads a locally mapped zone as a draft map version and publishes it.
+///
+/// UUIDs are preserved: `RouteNode.id` / `RouteEdge.id` become the server's
+/// `stable_id`, so a published map keeps the same identities the phone's AR
+/// anchors already use, and live state can reference them directly.
+struct MapPublisher {
+    let client: SupabaseClient
+
+    struct Result {
+        var buildingID: UUID
+        var mapVersionID: UUID
+        var version: Int
+        var nodeCount: Int
+        var edgeCount: Int
+    }
+
+    enum PublishError: LocalizedError {
+        case emptyGraph
+        case danglingEdges(Int)
+        case notAdmin
+
+        var errorDescription: String? {
+            switch self {
+            case .emptyGraph:
+                return "This zone has no waypoints to publish."
+            case .danglingEdges(let count):
+                return "\(count) connection(s) reference a missing waypoint. Re-map the zone."
+            case .notAdmin:
+                return "Publishing requires an administrator account."
+            }
+        }
+    }
+
+    // MARK: - Wire payloads
+
+    private struct NodeInsert: Encodable {
+        let map_version_id: String
+        let stable_id: String
+        let floor_id: String
+        let name: String
+        let type: String
+        let position: [String: Float]
+    }
+
+    private struct EdgeInsert: Encodable {
+        let map_version_id: String
+        let stable_id: String
+        let from_node_stable_id: String
+        let to_node_stable_id: String
+        let distance_meters: Double
+        let bidirectional: Bool
+        let contains_stairs: Bool
+        let requires_elevator: Bool
+        let wheelchair_accessible: Bool
+    }
+
+    private struct BuildingRow: Decodable {
+        let id: UUID
+    }
+
+    private struct MapVersionRow: Decodable {
+        let id: UUID
+        let version: Int
+    }
+
+    // MARK: - Validation
+
+    /// Edges whose endpoints are not in the node set. Checked before upload so a
+    /// bad graph is rejected locally rather than half-written to the server.
+    static func danglingEdgeCount(in graph: BuildingGraph) -> Int {
+        let ids = Set(graph.nodes.map(\.id))
+        return graph.edges.filter { !ids.contains($0.fromNodeID) || !ids.contains($0.toNodeID) }.count
+    }
+
+    static func validate(_ graph: BuildingGraph) throws {
+        guard !graph.nodes.isEmpty else { throw PublishError.emptyGraph }
+        let dangling = danglingEdgeCount(in: graph)
+        guard dangling == 0 else { throw PublishError.danglingEdges(dangling) }
+    }
+
+    // MARK: - Publish
+
+    /// Creates the building if needed, uploads the graph as a draft, then
+    /// publishes. `publish_map_version` validates and archives the old version
+    /// in one transaction, so a failure never leaves a half-published map.
+    func publish(
+        zone: MappingZone,
+        graph: BuildingGraph,
+        organizationID: UUID,
+        existingBuildingID: UUID?
+    ) async throws -> Result {
+        try Self.validate(graph)
+
+        let buildingID: UUID
+        if let existingBuildingID {
+            buildingID = existingBuildingID
+        } else {
+            let row: BuildingRow = try await client
+                .from("buildings")
+                .insert([
+                    "organization_id": organizationID.uuidString,
+                    "name": zone.building.isEmpty ? zone.displayTitle : zone.building,
+                    "address": zone.campus,
+                ])
+                .select("id")
+                .single()
+                .execute()
+                .value
+            buildingID = row.id
+        }
+
+        let draft: MapVersionRow = try await client
+            .rpc("create_draft_map_version", params: ["p_building_id": buildingID.uuidString])
+            .select("id,version")
+            .single()
+            .execute()
+            .value
+
+        let floor = zone.floor.isEmpty ? "default" : zone.floor
+        let nodeRows = graph.nodes.map { node in
+            NodeInsert(
+                map_version_id: draft.id.uuidString,
+                stable_id: node.id.uuidString,
+                floor_id: floor,
+                name: node.name,
+                type: node.type.rawValue,
+                position: [
+                    "x": node.worldPosition.x,
+                    "y": node.worldPosition.y,
+                    "z": node.worldPosition.z,
+                ]
+            )
+        }
+        // Batched so a large zone does not exceed the request size limit.
+        for chunk in nodeRows.chunked(into: 200) {
+            try await client.from("route_nodes").insert(chunk).execute()
+        }
+
+        let edgeRows = graph.edges.map { edge in
+            EdgeInsert(
+                map_version_id: draft.id.uuidString,
+                stable_id: edge.id.uuidString,
+                from_node_stable_id: edge.fromNodeID.uuidString,
+                to_node_stable_id: edge.toNodeID.uuidString,
+                distance_meters: edge.distanceMeters,
+                bidirectional: edge.isBidirectional,
+                contains_stairs: edge.accessibility.containsStairs,
+                requires_elevator: edge.accessibility.requiresElevator,
+                wheelchair_accessible: edge.accessibility.wheelchairAccessible
+            )
+        }
+        for chunk in edgeRows.chunked(into: 200) {
+            try await client.from("route_edges").insert(chunk).execute()
+        }
+
+        _ = try await client
+            .rpc("publish_map_version", params: ["p_map_version_id": draft.id.uuidString])
+            .execute()
+
+        return Result(
+            buildingID: buildingID,
+            mapVersionID: draft.id,
+            version: draft.version,
+            nodeCount: nodeRows.count,
+            edgeCount: edgeRows.count
+        )
+    }
+}
+
+extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0 else { return [self] }
+        return stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
+        }
+    }
+}
