@@ -106,7 +106,7 @@ export function Inspector({
   const to = nodeByStable[edge.to_node_stable_id]?.name ?? "—";
   const current = state?.status ?? "available";
   const meta = STATUS_META[current];
-  const effect = availabilityFor(status, hazard);
+  const effect = availabilityFor(status, hazard, severity);
 
   return (
     <Panel title="Incident">

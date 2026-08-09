@@ -58,12 +58,27 @@ export function hazardIcon(type: string | null | undefined): string {
   return HAZARDS.find((h) => h.value === type)?.icon ?? "⚠️";
 }
 
-/** Resolves a published live row into what routing should actually do. */
-export function availabilityFor(status: EdgeStatus, hazard: string | null): Availability {
+/**
+ * Resolves a published live row into what routing should actually do.
+ *
+ * The status is authoritative for traversability and the hazard type only
+ * sizes the penalty, matching `RouteEdge.availability` on the phones.
+ * Publishing `restricted` never removes a segment — turning a stated
+ * restriction into a hard block would be putting words in the administrator's
+ * mouth — but a hazard that would normally close it makes it a last resort.
+ */
+export function availabilityFor(
+  status: EdgeStatus,
+  hazard: string | null,
+  severity = 3,
+): Availability {
   if (status === "available") return { kind: "available" };
   if (status === "blocked") return { kind: "unavailable" };
-  const entry = HAZARDS.find((h) => h.value === hazard);
-  return entry?.restricted ?? { kind: "discouraged", costMultiplier: 3 };
+  const described = HAZARDS.find((h) => h.value === hazard)?.restricted;
+  if (described && described.kind === "discouraged") {
+    return { kind: "discouraged", costMultiplier: described.costMultiplier };
+  }
+  return { kind: "discouraged", costMultiplier: 6 + Math.max(1, Math.min(5, severity)) * 2 };
 }
 
 export const STATUS_META: Record<EdgeStatus, { label: string; tone: Tone; icon: string }> = {
