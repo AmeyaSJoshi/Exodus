@@ -100,7 +100,10 @@ declare
     e_elev_exit   uuid := 'b0000000-0000-0000-0000-000000000005';
     e_inter_refug uuid := 'b0000000-0000-0000-0000-000000000006';
 begin
-    perform pg_temp.create_test_user(admin_uid,    'admin@egress.test',    'egress-admin-pw');
+    -- Changing this changes the login after every reset: the seed owns these
+    -- credentials, so a password set out-of-band through the admin API is
+    -- silently reverted the next time the database is rebuilt.
+    perform pg_temp.create_test_user(admin_uid,    'admin@egress.test',    'egress-dev-1');
     perform pg_temp.create_test_user(viewer_uid,   'viewer@egress.test',   'egress-viewer-pw');
     perform pg_temp.create_test_user(outsider_uid, 'outsider@egress.test', 'egress-outsider-pw');
     perform pg_temp.create_test_user(soham_uid,    'soham.pradhan.ca@gmail.com', 'egress-soham-pw');

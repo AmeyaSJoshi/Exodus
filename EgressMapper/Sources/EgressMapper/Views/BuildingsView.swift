@@ -37,6 +37,9 @@ final class BackendSession {
                 error = "Your account is not assigned to an organization. Ask an administrator to add you."
                 return
             }
+            // Only now is the configuration known good, so only now is it
+            // worth keeping for next launch.
+            config.save()
             try await withTimeout(seconds: 15) {
                 try await self.service.loadCatalog()
                 try await self.service.loadBuildings()

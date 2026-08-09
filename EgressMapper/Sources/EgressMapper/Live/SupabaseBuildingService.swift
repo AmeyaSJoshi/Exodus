@@ -44,7 +44,9 @@ final class SupabaseBuildingService: BuildingStateService {
             throw BackendError.notConfigured
         }
         client = SupabaseClient(supabaseURL: url, supabaseKey: config.anonKey)
-        config.save()
+        // Deliberately not persisted here: a typo'd address would overwrite a
+        // working saved config before anyone found out it was wrong. The
+        // caller saves once the credentials have actually been accepted.
     }
 
     func signIn(email: String, password: String) async throws {
