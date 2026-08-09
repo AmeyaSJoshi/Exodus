@@ -6,6 +6,10 @@ struct DebugOverlayView: View {
     let manager: ARSessionManager
     var routeNode: String?
     var distanceToNext: Double?
+    var estimate: LocationEstimate?
+    var destinationExit: String?
+    var activeHazardCount: Int?
+    var profile: NavigationProfile?
 
     @State private var expanded = false
     @State private var exportURL: URL?
@@ -31,8 +35,19 @@ struct DebugOverlayView: View {
                     row("waypoints", "\(manager.waypoints.count)")
                     row("anchors", "\(manager.restoredAnchorCount)")
                     row("reloc", "\(manager.relocalizationSeconds)s / ok=\(manager.didRelocalize)")
+                    if let estimate {
+                        row("edge", estimate.routePosition.edgeID?.uuidString.prefix(8).description ?? "—")
+                        row("frac", estimate.routePosition.fractionAlongEdge.map { String(format: "%.3f", $0) } ?? "—")
+                        row("offRoute", String(format: "%.2f m", estimate.distanceFromRouteMeters))
+                        row("confidence", estimate.confidence.rawValue)
+                    }
                     if let routeNode { row("node", routeNode) }
                     if let distanceToNext { row("toNext", String(format: "%.2f m", distanceToNext)) }
+                    if let destinationExit { row("exit", destinationExit) }
+                    if let activeHazardCount { row("hazards", "\(activeHazardCount)") }
+                    if let profile {
+                        row("profile", profile.constraintSummary ?? "standard")
+                    }
                     if let ocr = manager.lastRecognizedSign {
                         row("ocr", "\(ocr.text) (\(String(format: "%.2f", ocr.confidence)))")
                     }

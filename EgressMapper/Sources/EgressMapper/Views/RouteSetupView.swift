@@ -2,6 +2,9 @@ import SwiftUI
 
 struct RouteSetupView: View {
     let zone: MappingZone
+    /// Supplied by Emergency mode once the user's position is confirmed.
+    var presetStart: RoutePosition?
+    var presetEstimate: LocationEstimate?
 
     @Environment(ZoneRepository.self) private var repository
     @State private var waypoints: [Waypoint] = []
@@ -24,9 +27,16 @@ struct RouteSetupView: View {
         }
     }
 
+    /// A confirmed emergency position wins over the manual picker, so a
+    /// mid-hallway start routes from where the user actually stands.
+    private var startPosition: RoutePosition? {
+        if let presetStart { return presetStart }
+        guard let start else { return nil }
+        return RoutePosition(nodeID: start.id, worldPosition: start.position)
+    }
+
     private var calculated: CalculatedRoute? {
-        guard let graph, let start, let destination else { return nil }
-        let position = RoutePosition(nodeID: start.id, worldPosition: start.position)
+        guard let graph, let position = startPosition, let destination else { return nil }
         return try? ShortestPathService.findRoute(
             from: position, to: destination.id, graph: graph, profile: profile
         )
@@ -108,14 +118,32 @@ struct RouteSetupView: View {
         }
     }
 
+    @ViewBuilder
     private var startSection: some View {
-        Section("Start") {
-            Picker("Start at", selection: $start) {
-                Text("Select…").tag(Waypoint?.none)
-                ForEach(waypoints) { w in
-                    Text(w.name).tag(Waypoint?.some(w))
+        Section {
+            if let presetEstimate {
+                // Position came from AR relocalization; do not let a picker
+                // silently override the confirmed physical location.
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(
+                        LocalizationService.describe(presetEstimate, zone: zone),
+                        systemImage: "location.fill"
+                    )
+                    .font(.subheadline.weight(.medium))
+                    Text("\(presetEstimate.confidence.displayName) · confirmed by you")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Picker("Start at", selection: $start) {
+                    Text("Select…").tag(Waypoint?.none)
+                    ForEach(waypoints) { w in
+                        Text(w.name).tag(Waypoint?.some(w))
+                    }
                 }
             }
+        } header: {
+            Text("Start")
         }
     }
 
