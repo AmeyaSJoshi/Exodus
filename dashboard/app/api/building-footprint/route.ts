@@ -68,7 +68,11 @@ export async function POST(request: Request) {
   try {
     const upstream = await fetch(OVERPASS_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        // Overpass rejects requests without a descriptive User-Agent (406).
+        "User-Agent": "EGRESS/1.0 (dev)",
+      },
       body: `data=${encodeURIComponent(query)}`,
     });
     if (!upstream.ok) {

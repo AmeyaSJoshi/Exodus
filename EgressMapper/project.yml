@@ -27,10 +27,12 @@ targets:
         NSPhotoLibraryUsageDescription: Import a floor plan image to align with a recorded route.
         NSMicrophoneUsageDescription: EGRESS Mapper listens only while you hold the voice-report button, so you can report a blocked route without typing.
         NSSpeechRecognitionUsageDescription: Spoken reports are converted to text on device to understand phrases like "the hallway ahead is blocked".
+        NSLocalNetworkUsageDescription: EGRESS Mapper connects to the local Supabase instance on your Mac during development.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
+          NSAllowsLocalNetworking: true
           NSExceptionDomains:
             localhost:
               NSExceptionAllowsInsecureHTTPLoads: true
@@ -38,12 +40,12 @@ targets:
               NSExceptionAllowsInsecureHTTPLoads: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.egress.mapper
+        PRODUCT_BUNDLE_IDENTIFIER: com.egress.mapper.sp
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: "NO"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 553SS7SNPX
+        DEVELOPMENT_TEAM: AYZ8S57X7F
   EgressMapperTests:
     type: bundle.unit-test
     platform: iOS

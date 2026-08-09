@@ -164,10 +164,18 @@ export function BuildingFocusView({
           // Layer does not support that paint property — leave it as styled.
         }
       }
+      map.resize();
       setLoaded(true);
     });
 
+    // The container is laid out by a responsive grid, so its size can settle
+    // after the map is constructed; without this the canvas keeps the size it
+    // was born with and paints only part of the viewport.
+    const ro = new ResizeObserver(() => map.resize());
+    ro.observe(containerRef.current);
+
     return () => {
+      ro.disconnect();
       map.remove();
       mapRef.current = null;
       setLoaded(false);
