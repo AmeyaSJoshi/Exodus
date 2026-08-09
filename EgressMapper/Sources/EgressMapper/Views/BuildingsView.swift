@@ -162,14 +162,21 @@ struct BackendSignInView: View {
             Button {
                 Task { await session.signIn() }
             } label: {
-                HStack {
-                    if session.busy { ProgressView() }
-                    Text(title)
+                HStack(spacing: EG.Space.s) {
+                    if session.busy {
+                        ProgressView().tint(.white)
+                        Text("Signing in…")
+                    } else {
+                        Text(title)
+                    }
                 }
             }
+            .buttonStyle(EGPrimaryButtonStyle(tone: .neutral))
+            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
             .disabled(session.busy || session.config.anonKey.isEmpty || session.email.isEmpty)
             if let error = session.error {
-                Text(error).font(.caption).foregroundStyle(.red)
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(Color.egEmergency)
             }
         } header: {
             Text("Account")

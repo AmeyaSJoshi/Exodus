@@ -20,10 +20,11 @@ struct EmergencyBuildingListView: View {
         List {
             Section {
                 Label(
-                    "Follow official emergency instructions and posted evacuation procedures. This prototype is an aid, not an authority.",
+                    "Follow official emergency instructions and posted evacuation procedures. This app is an aid, not an authority.",
                     systemImage: "exclamationmark.triangle.fill"
                 )
-                .font(.footnote).foregroundStyle(.orange)
+                .font(.footnote)
+                .foregroundStyle(Color.egCaution)
             }
 
             if !session.isSignedIn {
@@ -32,23 +33,26 @@ struct EmergencyBuildingListView: View {
 
             if let error = session.error, session.isSignedIn {
                 Section {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.red)
-                    Button("Retry") { startup.retry(session: session) }.font(.caption)
+                    EGBanner(
+                        title: "Couldn't load your buildings",
+                        detail: error,
+                        tone: .caution
+                    )
+                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                    Button("Try Again") { startup.retry(session: session) }
                 }
             }
 
             Section {
                 if entries.isEmpty {
-                    ContentUnavailableView(
-                        session.isSignedIn ? "No Buildings Available" : "Sign In to Continue",
-                        systemImage: "building.2",
-                        description: Text(
-                            session.isSignedIn
-                            ? "No published buildings in your organization yet, and no maps on this device."
-                            : "Sign in above to load buildings published by your organization."
-                        )
+                    EGEmptyState(
+                        title: session.isSignedIn ? "No buildings available" : "Sign in to continue",
+                        message: session.isSignedIn
+                            ? "Nothing has been published to your organization yet, and there are no maps on this device. Map a zone in Configure to navigate without a network."
+                            : "Sign in above to load the buildings your organization has published.",
+                        symbol: "building.2"
                     )
+                    .listRowBackground(Color.clear)
                 }
                 ForEach(entries) { entry in
                     Button {
@@ -91,29 +95,51 @@ struct BuildingRow: View {
 
     private var tint: Color {
         switch entry.availability {
-        case .offlineAvailable, .publishedByYou: return .green
-        case .updateAvailable: return .yellow
-        case .downloadFailed: return .red
-        case .downloading: return .blue
+        case .offlineAvailable, .publishedByYou: return .egSafe
+        case .updateAvailable: return .egCaution
+        case .downloadFailed: return .egEmergency
+        case .downloading: return .accentColor
         default: return .secondary
         }
     }
 
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "building.2.fill")
-                .font(.title3).foregroundStyle(.green)
-                .frame(width: 36, height: 36)
-                .background(Color.green.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(entry.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                Text(entry.subtitle).font(.caption).foregroundStyle(.secondary)
-                Text(entry.availability.label).font(.caption2).foregroundStyle(tint)
-            }
-            Spacer()
-            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+    /// Availability is stated with a symbol as well as a colour.
+    private var availabilitySymbol: String {
+        switch entry.availability {
+        case .offlineAvailable: return "arrow.down.circle.fill"
+        case .publishedByYou: return "checkmark.seal.fill"
+        case .updateAvailable: return "arrow.triangle.2.circlepath"
+        case .downloadFailed: return "exclamationmark.triangle.fill"
+        case .downloading: return "arrow.down.circle"
+        case .localDraft: return "iphone"
+        case .downloadRequired: return "icloud.and.arrow.down"
         }
-        .padding(.vertical, 4)
+    }
+
+    var body: some View {
+        HStack(spacing: EG.Space.m) {
+            Image(systemName: "building.2.fill")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .frame(width: 36, height: 36)
+                .background(Color.egSurface, in: RoundedRectangle(cornerRadius: EG.Space.s))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entry.name).font(.headline)
+                Text(entry.subtitle).font(.subheadline).foregroundStyle(.secondary)
+                Label(entry.availability.label, systemImage: availabilitySymbol)
+                    .font(.caption)
+                    .foregroundStyle(tint)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .padding(.vertical, EG.Space.xs)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -171,8 +197,24 @@ struct EvacuationView: View {
         List {
             statusSection
             if loading {
-                Section { HStack { ProgressView(); Text("Loading map…") } }
-            } else if effectiveGraph != nil {
+                Section {
+                    EGLoadingState(
+                        title: "Loading building…",
+                        detail: "Preparing the route map for \(building.name)."
+                    )
+                    .listRowBackground(Color.clear)
+                }
+            } else if effectiveGraph == nil {
+                Section {
+                    EGEmptyState(
+                        title: "This building isn't available",
+                        message: loadError ?? "No route map could be loaded for this building. Download it from Saved Maps, or choose a different building.",
+                        symbol: "map",
+                        tone: .caution
+                    )
+                    .listRowBackground(Color.clear)
+                }
+            } else {
                 locationSection
                 // The route preview appears as soon as a start point exists,
                 // so there is always a visible next action.
@@ -200,6 +242,8 @@ struct EvacuationView: View {
         .fullScreenCover(isPresented: $navigating) {
             guidanceDestination
         }
+        .egAnimation(options?.best.destination.id)
+        .egAnimation(banner)
         .onChange(of: startNodeID) { _, _ in recompute(announce: false) }
         .onChange(of: profile) { _, _ in recompute(announce: false) }
         .onChange(of: preferredExitID) { _, _ in recompute(announce: false) }
@@ -207,35 +251,35 @@ struct EvacuationView: View {
 
     private var statusSection: some View {
         Section {
-            HStack {
-                Circle()
-                    .fill(service.connection == .live ? .green : service.connection == .error ? .red : .orange)
-                    .frame(width: 8, height: 8)
-                Text(service.connection.displayName)
-                Spacer()
-                Text("rev \(service.revision)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            }
-            if service.usingCache {
-                Label("Using the cached map — live updates unavailable", systemImage: "wifi.slash")
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            if let package {
-                Label(
-                    "Offline map v\(package.version) · \(package.nodes.count) points",
-                    systemImage: "arrow.down.circle.fill"
-                )
-                .font(.caption).foregroundStyle(.green)
+            EGConnectionRow(connection: service.connection, usingCache: service.usingCache)
+                .egAnimation(service.connection)
+
+            if package != nil {
+                Label("Available offline", systemImage: "arrow.down.circle.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.egSafe)
                 if isRoutingDataOnly {
                     Label(
-                        "AR localization unavailable — map contains routing data only.",
+                        "Camera positioning unavailable — this map has routing data only.",
                         systemImage: "arkit"
                     )
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(Color.egCaution)
                 }
             }
-            if let loadError {
-                Text(loadError).font(.caption).foregroundStyle(.red)
+            if let loadError, effectiveGraph != nil {
+                Label(loadError, systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(Color.egCaution)
             }
+            #if DEBUG
+            LabeledContent("Revision", value: "\(service.revision)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            if let package {
+                LabeledContent("Package", value: "v\(package.version) · \(package.nodes.count) points")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            #endif
         }
     }
 
@@ -258,10 +302,10 @@ struct EvacuationView: View {
                 Button {
                     showLocalization = true
                 } label: {
-                    Label("I Don't Know Where I Am", systemImage: "location.magnifyingglass")
-                        .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 6)
+                    Label("Find Me with the Camera", systemImage: "location.magnifyingglass")
                 }
-                .tint(.blue)
+                .buttonStyle(EGPrimaryButtonStyle(tone: .neutral))
+                .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
             }
 
             Picker("I am at", selection: $startNodeID) {
@@ -301,33 +345,58 @@ struct EvacuationView: View {
     private var readySection: some View {
         Section {
             if let banner {
-                Label(banner, systemImage: "arrow.triangle.branch")
-                    .font(.caption).foregroundStyle(.yellow)
+                EGBanner(
+                    title: banner,
+                    tone: .caution,
+                    symbol: "arrow.triangle.branch",
+                    onDismiss: { self.banner = nil }
+                )
+                .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                .modifier(EGTransition())
             }
             if let best = options?.best {
-                Text(best.destination.name).font(.title3.weight(.bold))
-                Text("\(Int(best.totalDistanceMeters.rounded())) m · \(best.nodes.map(\.name).joined(separator: " → "))")
-                    .font(.caption).foregroundStyle(.secondary)
-                if best.isRefugeFallback {
-                    Label("No exit reachable — routing to an area of refuge.", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2).foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: EG.Space.s) {
+                    EGStatusBadge(status: .routeReady, compact: true)
+                    Text(best.destination.name)
+                        .font(.title2.weight(.bold))
+                    Text("\(Int(best.totalDistanceMeters.rounded())) m · \(best.nodes.count - 1) steps")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text(best.nodes.map(\.name).joined(separator: " → "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                if let summary = options?.summary {
-                    Text(summary).font(.caption2).foregroundStyle(.secondary)
+                .padding(.vertical, EG.Space.xs)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(
+                    "Route ready to \(best.destination.name), \(Int(best.totalDistanceMeters.rounded())) meters"
+                )
+
+                if best.isRefugeFallback {
+                    Label(
+                        "No exit is reachable — routing to an area of refuge.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.subheadline)
+                    .foregroundStyle(Color.egCaution)
                 }
                 if let locatedBy {
-                    Text(locatedBy.displayName).font(.caption2).foregroundStyle(.secondary)
+                    Label(locatedBy.displayName, systemImage: "location.fill")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
+                #if DEBUG
+                if let summary = options?.summary {
+                    Text(summary).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                }
+                #endif
+
                 Button {
                     start()
                 } label: {
                     Label("Start Evacuation", systemImage: "figure.run")
-                        .font(.title3.weight(.bold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
+                .buttonStyle(EGPrimaryButtonStyle(tone: .critical))
+                .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                 .disabled(!canStart)
 
                 if let alternatives = options?.alternatives, !alternatives.isEmpty {
@@ -341,16 +410,21 @@ struct EvacuationView: View {
                             Button("Use the safest exit") { preferredExitID = nil }
                         }
                     }
-                    .font(.caption)
+                    .font(.subheadline)
                 }
             } else {
                 // Never leave a located occupant with no next action: say what
                 // went wrong and what they can do instead.
-                Label(routeError ?? loadError ?? "No route could be calculated from here.",
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
-                Button("Select Room Manually") { localized = nil; startNodeID = nil }
-                    .font(.caption)
+                EGEmptyState(
+                    title: "No safe route from here",
+                    message: routeError ?? loadError
+                        ?? "Every route out of this location is currently blocked or ruled out by your accessibility settings. Try another starting room.",
+                    symbol: "exclamationmark.triangle.fill",
+                    tone: .critical,
+                    actionTitle: "Choose Another Room",
+                    action: { localized = nil; startNodeID = nil }
+                )
+                .listRowBackground(Color.clear)
             }
         } header: {
             Text("Your route out")

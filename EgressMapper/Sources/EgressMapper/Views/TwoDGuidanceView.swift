@@ -37,57 +37,76 @@ struct TwoDGuidanceView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
+        VStack(alignment: .leading, spacing: EG.Space.s) {
+            HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Evacuating").font(.caption).foregroundStyle(.secondary)
-                    Text(route.destination.name).font(.title2.weight(.heavy))
+                    Text("Evacuating to").font(.caption).foregroundStyle(.secondary)
+                    Text(route.destination.name)
+                        .font(.title.weight(.bold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("\(Int(route.totalDistanceMeters.rounded())) m · \(steps.count) steps")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                Spacer()
+                Spacer(minLength: EG.Space.s)
                 Button("Stop", role: .destructive, action: onExit)
                     .buttonStyle(.bordered)
+                    .frame(minHeight: EG.minTarget)
+                    .accessibilityLabel("Stop navigation")
             }
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(connection == .live ? .green : connection == .error ? .red : .orange)
-                    .frame(width: 7, height: 7)
-                Text("\(Int(route.totalDistanceMeters.rounded())) m")
+            .accessibilityElement(children: .contain)
+
+            HStack(spacing: EG.Space.s) {
+                EGStatusBadge(status: EGStatus(connection: connection), compact: true)
                 if route.isRefugeFallback {
-                    Text("· area of refuge").foregroundStyle(.orange)
+                    Label("Area of refuge", systemImage: "shield.lefthalf.filled")
+                        .font(.caption)
+                        .foregroundStyle(Color.egCaution)
                 }
-                Spacer()
             }
-            .font(.caption)
 
             if let banner {
-                Label(banner, systemImage: "arrow.triangle.branch")
-                    .font(.caption).foregroundStyle(.yellow)
+                EGBanner(
+                    title: banner,
+                    tone: .caution,
+                    symbol: "arrow.triangle.branch"
+                )
+                .modifier(EGTransition())
             }
         }
-        .padding(16)
+        .padding(EG.Space.l)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.ultraThinMaterial)
+        .egAnimation(banner)
+        .egAnimation(route.destination.id)
     }
 
     private var steplist: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Follow this route").font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: EG.Space.m) {
+                Text("FOLLOW THIS ROUTE")
+                    .font(.caption.weight(.semibold))
+                    .kerning(0.6)
+                    .foregroundStyle(.secondary)
+                    .accessibilityAddTraits(.isHeader)
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                    HStack(spacing: 10) {
-                        Image(systemName: index == steps.count - 1
-                              ? "figure.run.square.stack.fill" : "arrow.turn.up.right")
-                            .foregroundStyle(index == steps.count - 1 ? .green : .blue)
-                            .frame(width: 22)
+                    let isLast = index == steps.count - 1
+                    HStack(spacing: EG.Space.m) {
+                        Image(systemName: isLast ? "flag.checkered" : "arrow.turn.up.right")
+                            .foregroundStyle(isLast ? Color.egSafe : .secondary)
+                            .frame(width: 24)
+                            .accessibilityHidden(true)
                         Text(step)
-                        Spacer()
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
                     }
-                    .font(.subheadline)
+                    .font(.body)
+                    .accessibilityElement(children: .combine)
                 }
             }
-            .padding(16)
+            .padding(EG.Space.l)
         }
-        .frame(maxHeight: 220)
+        .frame(maxHeight: 240)
         .background(.ultraThinMaterial)
     }
 }

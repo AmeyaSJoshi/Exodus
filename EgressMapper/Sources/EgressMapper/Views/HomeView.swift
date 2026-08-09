@@ -1,12 +1,13 @@
 import SwiftUI
 
-/// Top level of the app: a prominent Emergency path for someone who needs to
-/// get out, and a Configure path for the administrator tooling.
+/// Top level of the app: a dominant Emergency path for someone who needs to
+/// get out, and quieter administrative entry points beneath it.
 struct HomeView: View {
     @Environment(ZoneRepository.self) private var repository
     @Environment(BackendSession.self) private var session
     @Environment(StartupCoordinator.self) private var startup
     @Environment(DeviceCapabilities.self) private var capabilities
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var showEmergency = false
     @State private var showConfigure = false
     @State private var showSavedZones = false
@@ -19,17 +20,22 @@ struct HomeView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    header
+                VStack(alignment: .leading, spacing: EG.Space.l) {
+                    EGBrandMark(subtitle: "Indoor evacuation guidance")
+                        .padding(.top, EG.Space.s)
+                        .padding(.bottom, EG.Space.xs)
+
+                    emergencyButton
+
                     if capabilities.resolved && !arSupported { unsupportedBanner }
                     if let status = startup.phase.label { statusStrip(status) }
-                    emergencyButton
+
                     secondaryActions
                     disclaimer
                 }
-                .padding(20)
+                .padding(EG.Space.l)
             }
-            .background(Color.black.ignoresSafeArea())
+            .background(Color(.systemBackground).ignoresSafeArea())
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(isPresented: $showEmergency) {
                 EmergencyBuildingListView(session: session)
@@ -49,112 +55,129 @@ struct HomeView: View {
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("EGRESS")
-                .font(.system(size: 44, weight: .heavy, design: .rounded))
-                .foregroundStyle(.white)
-            Text("Indoor AR evacuation prototype")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 8)
-    }
-
     private var unsupportedBanner: some View {
-        Label(
-            "This device does not support ARKit world tracking. AR guidance is unavailable; the 2D map still works.",
-            systemImage: "exclamationmark.triangle.fill"
+        EGBanner(
+            title: "AR guidance unavailable",
+            detail: "This device does not support ARKit world tracking. The 2D route map works as normal.",
+            tone: .caution,
+            symbol: "arkit"
         )
-        .font(.footnote)
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
-        .foregroundStyle(.orange)
+        .egAnimation(arSupported)
     }
 
-    /// No account, no setup — the emergency path is always one tap away.
+    /// No account, no setup — the emergency path is always one tap away and is
+    /// the only red element on the screen.
     private var emergencyButton: some View {
         Button {
             showEmergency = true
         } label: {
-            VStack(spacing: 8) {
-                Image(systemName: "figure.run.circle.fill")
-                    .font(.system(size: 46))
-                Text("EMERGENCY")
-                    .font(.system(size: 28, weight: .heavy, design: .rounded))
-                Text("Guide me out of this building")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.9))
+            // Side by side normally; stacked at accessibility text sizes, where
+            // a horizontal layout hyphenated "Emergency" mid-word.
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: EG.Space.m))
+                : AnyLayout(HStackLayout(spacing: EG.Space.l))
+
+            layout {
+                Image(systemName: "figure.run")
+                    .font(.system(size: 40, weight: .semibold))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: EG.Space.xs) {
+                    Text("Emergency")
+                        .font(.largeTitle.weight(.heavy))
+                    Text("Find the safest available exit")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.92))
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 28)
-            .background(Color.red, in: RoundedRectangle(cornerRadius: 20))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(EG.Space.xl)
+            .background(Color.egEmergency, in: RoundedRectangle(cornerRadius: EG.Radius.prominent))
             .foregroundStyle(.white)
         }
-
+        .buttonStyle(.plain)
+        .accessibilityLabel("Emergency")
+        .accessibilityHint("Finds the safest available exit from this building")
     }
 
     private var secondaryActions: some View {
-        VStack(spacing: 12) {
-            Button {
-                Startup.log("tap: Configure")
-                showConfigure = true
-            } label: {
-                Label("Configure", systemImage: "slider.horizontal.3")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-            }
-            .buttonStyle(.bordered)
-            .tint(.white)
-
-            Button {
+        VStack(spacing: EG.Space.s) {
+            secondaryRow(
+                "Saved Maps",
+                detail: repository.zones.isEmpty
+                    ? "Buildings available on this device"
+                    : "\(repository.zones.count) on this device",
+                symbol: "map"
+            ) {
                 Startup.log("tap: Saved Maps")
                 showSavedZones = true
-            } label: {
-                Label("Saved Maps (\(repository.zones.count))", systemImage: "map")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
             }
-            .buttonStyle(.bordered)
-            .tint(.white)
+
+            secondaryRow(
+                "Configure",
+                detail: "Mapping, buildings and navigation settings",
+                symbol: "slider.horizontal.3"
+            ) {
+                Startup.log("tap: Configure")
+                showConfigure = true
+            }
         }
-        .padding(.top, 14)
+    }
+
+    private func secondaryRow(
+        _ title: String, detail: String, symbol: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: EG.Space.m) {
+                Image(systemName: symbol)
+                    .font(.body)
+                    .frame(width: 26)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .buttonStyle(EGSecondaryButtonStyle())
     }
 
     /// Non-blocking: it reports what is happening in the background and never
     /// covers or disables anything.
     private func statusStrip(_ text: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: EG.Space.s) {
             if startup.phase.canRetry {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                EGStatusBadge(status: .custom(text, "exclamationmark.triangle.fill", .caution))
+                Spacer(minLength: 0)
+                Button("Retry") { startup.retry(session: session) }
+                    .font(.subheadline.weight(.medium))
             } else {
-                ProgressView().controlSize(.mini)
-            }
-            Text(text).font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            if startup.phase.canRetry {
-                Button("Retry") { startup.retry(session: session) }.font(.caption)
+                EGStatusBadge(status: .custom(text, "arrow.clockwise", .neutral))
+                Spacer(minLength: 0)
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(Color.white.opacity(0.06), in: Capsule())
-        .allowsHitTesting(startup.phase.canRetry)
+        .egAnimation(startup.phase.canRetry)
+        .modifier(EGTransition())
     }
 
     private var disclaimer: some View {
-        Text("Experimental navigation prototype. Follow official emergency instructions and posted evacuation procedures.")
-            .font(.caption2)
+        Text("Experimental navigation aid. Always follow official emergency instructions and posted evacuation procedures.")
+            .font(.caption)
             .foregroundStyle(.secondary)
-            .padding(.top, 6)
+            .padding(.top, EG.Space.s)
     }
 }
 
-/// Administrator tooling — mapping and route creation. Nothing was removed
-/// from the original flow; it now lives behind this screen.
+/// Administrator tooling — mapping, buildings and route testing. An
+/// administrative workspace, deliberately not styled like an emergency screen.
 struct ConfigureView: View {
     @Environment(ZoneRepository.self) private var repository
     @Environment(BackendSession.self) private var session
@@ -165,44 +188,38 @@ struct ConfigureView: View {
 
     var body: some View {
         List {
-            Section("Mapping") {
+            Section {
                 Button {
                     showCreateZone = true
                 } label: {
-                    Label("Map a New Zone", systemImage: "camera.viewfinder")
+                    row("Map a Zone", "Record a hallway or floor with the camera", "camera.viewfinder", chevron: true)
                 }
+                .buttonStyle(.plain)
                 Button {
                     showSavedZones = true
                 } label: {
-                    Label("Saved Maps & Route Testing", systemImage: "map")
+                    row("Saved Zones", "Open, rename, test or publish a recorded map", "map", chevron: true)
                 }
+                .buttonStyle(.plain)
                 NavigationLink {
                     ActiveHazardsView()
                 } label: {
-                    Label("Active Hazards", systemImage: "exclamationmark.triangle")
+                    row("Active Hazards", "Closures reported from this device", "exclamationmark.triangle")
                 }
-
-            }
-
-            Section("Organization") {
-                NavigationLink {
-                    BuildingsView(session: session)
-                } label: {
-                    Label("Buildings", systemImage: "building.2")
-                }
+            } header: {
+                Text("Mapping")
+            } footer: {
+                Text("Route testing runs from a saved zone, using the same router as evacuation.")
             }
 
             Section {
                 NavigationLink {
-                    LiveDemoView()
+                    BuildingsView(session: session)
                 } label: {
-                    Label("Live Backend Diagnostics", systemImage: "stethoscope")
+                    row("Buildings", "Publish a building map for your organization", "building.2")
                 }
-                Toggle("Camera debug indicator", isOn: $showCameraDebug)
             } header: {
-                Text("Developer Tools")
-            } footer: {
-                Text("The camera indicator shows feed, tracking and session state while mapping. Useful when diagnosing a frozen or black preview on a device.")
+                Text("Organization")
             }
 
             Section {
@@ -215,6 +232,19 @@ struct ConfigureView: View {
                 Text("Navigation Profile")
             } footer: {
                 Text("Applied to every route. If no route satisfies these constraints, the app says so rather than quietly ignoring them.")
+            }
+
+            Section {
+                NavigationLink {
+                    LiveDemoView()
+                } label: {
+                    row("Live Backend Demo", "Exercise the backend and live rerouting without AR", "stethoscope")
+                }
+                Toggle("Camera debug indicator", isOn: $showCameraDebug)
+            } header: {
+                Text("Developer Tools")
+            } footer: {
+                Text("Diagnostics for development. The camera indicator shows feed, tracking and session state while mapping — useful when a preview freezes on a device.")
             }
         }
         .navigationTitle("Configure")
@@ -230,31 +260,58 @@ struct ConfigureView: View {
             try? repository.store.saveProfile(updated)
         }
     }
+
+    /// One consistent list row: title, one-line description, symbol. `chevron`
+    /// is drawn for plain Buttons so they match the NavigationLink rows.
+    private func row(
+        _ title: String, _ detail: String, _ symbol: String, chevron: Bool = false
+    ) -> some View {
+        HStack(spacing: 0) {
+            Label {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).foregroundStyle(.primary)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: symbol).foregroundStyle(Color.accentColor)
+            }
+            if chevron {
+                Spacer(minLength: EG.Space.s)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
 }
 
 struct ZoneRowView: View {
     let zone: MappingZone
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: EG.Space.m) {
             Image(systemName: "map.fill")
                 .font(.title3)
-                .foregroundStyle(.green)
+                .foregroundStyle(Color.egSafe)
                 .frame(width: 36, height: 36)
-                .background(Color.green.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+                .background(Color.egSafe.opacity(0.15), in: RoundedRectangle(cornerRadius: EG.Space.s))
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(zone.displayTitle)
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
                 Text(zone.displaySubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                HStack(spacing: 8) {
+                HStack(spacing: EG.Space.s) {
                     Label("\(zone.waypointCount)", systemImage: "mappin.circle")
                     Label(zone.formattedLength, systemImage: "ruler")
                     if zone.hasWorldMap {
-                        Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                        Label("AR ready", systemImage: "checkmark.seal.fill")
+                            .foregroundStyle(Color.egSafe)
                     }
                 }
                 .font(.caption2)
@@ -263,9 +320,11 @@ struct ZoneRowView: View {
             Spacer()
             Image(systemName: "chevron.right")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
         }
-        .padding(12)
-        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+        .padding(EG.Space.m)
+        .background(Color.egSurface, in: RoundedRectangle(cornerRadius: EG.Radius.card))
+        .accessibilityElement(children: .combine)
     }
 }

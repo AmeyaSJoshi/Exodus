@@ -10,6 +10,9 @@ struct CreateZoneView: View {
     @State private var zoneName = ""
     @State private var startedZone: MappingZone?
     @State private var firstEditLogged = false
+    @FocusState private var focused: Field?
+
+    private enum Field: Hashable { case campus, building, floor, zoneName }
 
     private var isValid: Bool {
         !building.trimmingCharacters(in: .whitespaces).isEmpty &&
@@ -21,11 +24,19 @@ struct CreateZoneView: View {
             Form {
                 Section("Location") {
                     TextField("Campus or property", text: $campus)
+                        .focused($focused, equals: .campus)
+                        .submitLabel(.next)
                     TextField("Building", text: $building)
+                        .focused($focused, equals: .building)
+                        .submitLabel(.next)
                     TextField("Floor", text: $floor)
+                        .focused($focused, equals: .floor)
+                        .submitLabel(.next)
                 }
                 Section {
                     TextField("Zone name (e.g. East Hallway)", text: $zoneName)
+                        .focused($focused, equals: .zoneName)
+                        .submitLabel(.done)
                 } header: {
                     Text("Zone")
                 } footer: {
@@ -43,6 +54,23 @@ struct CreateZoneView: View {
                 }
             }
             .onAppear { Startup.firstUse("create-zone-form") }
+            // The first required field takes focus on its own. Tapping a
+            // TextField to raise the keyboard was landing inconsistently while
+            // the sheet was still settling, which read as "it takes a few taps
+            // before typing works".
+            .task {
+                try? await Task.sleep(for: .milliseconds(400))
+                if focused == nil { focused = .building }
+            }
+            .onSubmit {
+                switch focused {
+                case .campus: focused = .building
+                case .building: focused = .floor
+                case .floor: focused = .zoneName
+                default: focused = nil
+                }
+            }
+            .scrollDismissesKeyboard(.interactively)
             // Names the cost of the first keystroke, which is where the
             // keyboard's own cold start lands. Logs once, then stays quiet.
             .onChange(of: zoneName) { _, _ in
