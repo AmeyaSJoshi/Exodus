@@ -219,6 +219,20 @@ private struct FocusMapRepresentable: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
+            // The camera set at construction is discarded when the style
+            // finishes loading, leaving the map at world zoom — so frame the
+            // anchor again now that there is a style to frame it against.
+            mapView.setCamera(
+                MLNMapCamera(
+                    lookingAtCenter: CLLocationCoordinate2D(
+                        latitude: anchor.latitude, longitude: anchor.longitude
+                    ),
+                    altitude: 250,
+                    pitch: 60,
+                    heading: anchor.headingDeg
+                ),
+                animated: false
+            )
             muteBaseStyle(style)
             applyOverlays(to: style)
         }
@@ -341,6 +355,7 @@ private struct FocusMapRepresentable: UIViewRepresentable {
                 }
                 layer.fillExtrusionOpacity = NSExpression(forConstantValue: isGhost ? ghostOpacity : fullOpacity)
                 layer.predicate = predicate(activeIdx: activeIdx, ghost: isGhost)
+                layer.isVisible = !(isGhost && activeIdx == nil)
             }
         }
 
@@ -382,13 +397,18 @@ private struct FocusMapRepresentable: UIViewRepresentable {
                 }
                 layer.textOpacity = NSExpression(forConstantValue: isGhost ? ghostOpacity : 1.0)
                 layer.predicate = predicate(activeIdx: activeIdx, ghost: isGhost)
+                layer.isVisible = !(isGhost && activeIdx == nil)
             }
         }
 
         /// With no floor selected every feature is drawn at full opacity and
         /// the ghost layer is switched off entirely.
-        private func predicate(activeIdx: Int?, ghost: Bool) -> NSPredicate {
-            guard let activeIdx else { return NSPredicate(value: !ghost) }
+        /// Returns nil to mean "no filter". A constant NSPredicate(value:)
+        /// cannot be expressed as a style filter — MapLibre Native rejects it
+        /// with "filter value must be a non empty array" — so the all-floors
+        /// case clears the filter and hides the ghost layer instead.
+        private func predicate(activeIdx: Int?, ghost: Bool) -> NSPredicate? {
+            guard let activeIdx else { return nil }
             return ghost
                 ? NSPredicate(format: "floorIdx != %d", activeIdx)
                 : NSPredicate(format: "floorIdx == %d", activeIdx)
