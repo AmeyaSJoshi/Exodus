@@ -20,6 +20,35 @@ const GHOST_OPACITY = 0.1;
 
 type LngLat = [number, number];
 type Shell = { geojson: GeoJSONPolygon; height: number; source: "osm" | "hull" };
+type AnchorDraft = { lat: number; lng: number; heading: number; scale: number };
+
+/** Leading+trailing throttle: the first change in a quiet period applies
+ * immediately, further changes within `intervalMs` collapse into one
+ * trailing update — so dragging a slider doesn't rebuild the whole overlay
+ * on every pixel of movement. */
+function useThrottled<T>(value: T, intervalMs: number): T {
+  const [out, setOut] = useState(value);
+  const lastRef = useRef(0);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const now = Date.now();
+    const elapsed = now - lastRef.current;
+    if (elapsed >= intervalMs) {
+      lastRef.current = now;
+      setOut(value);
+    } else {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = setTimeout(() => {
+        lastRef.current = Date.now();
+        setOut(value);
+      }, intervalMs - elapsed);
+    }
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, [value, intervalMs]);
+  return out;
+}
 
 export function BuildingFocusView({
   building,
@@ -28,6 +57,7 @@ export function BuildingFocusView({
   allFloors,
   canEdit,
   onFootprintCached,
+  onAnchorSaved,
 }: {
   building: Building;
   nodes: RouteNode[];
@@ -35,6 +65,7 @@ export function BuildingFocusView({
   allFloors: string[];
   canEdit: boolean;
   onFootprintCached?: (patch: Partial<Building>) => void;
+  onAnchorSaved?: (patch: Partial<Building>) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MLMap | null>(null);
@@ -66,14 +97,120 @@ export function BuildingFocusView({
   const heading = building.heading_deg ?? 0;
   const scale = building.scale || 1;
 
+  // MARK: Align mode — heading/scale/anchor were never corrected for AR
+  // capture drift, so the indoor overlay floats rotated/offset relative to
+  // the (correctly placed, OSM-sourced) shell. This lets an admin nudge it
+  // into place and persist the fix onto the same row the phone reads.
+  const [aligning, setAligning] = useState(false);
+  const [draft, setDraft] = useState<AnchorDraft | null>(
+    anchorLat != null && anchorLng != null ? { lat: anchorLat, lng: anchorLng, heading, scale } : null,
+  );
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Reseed only when the building itself changes — not on every prop update,
+  // or a save's own onAnchorSaved patch would immediately overwrite the draft
+  // it just produced.
+  useEffect(() => {
+    if (anchorLat == null || anchorLng == null) {
+      setDraft(null);
+      return;
+    }
+    setDraft({ lat: anchorLat, lng: anchorLng, heading, scale });
+    setSaveError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [building.id]);
+
+  const dirty =
+    draft != null && (draft.lat !== anchorLat || draft.lng !== anchorLng || draft.heading !== heading || draft.scale !== scale);
+
+  // Cap the overlay to ~10 redraws/sec while a slider or nudge is dragged —
+  // applyOverlays rebuilds every layer, and MapLibre does not need one full
+  // rebuild per pixel of drag.
+  const throttledDraft = useThrottled(draft, 100);
+  const renderAnchorLat = throttledDraft?.lat ?? anchorLat;
+  const renderAnchorLng = throttledDraft?.lng ?? anchorLng;
+  const renderHeading = throttledDraft?.heading ?? heading;
+  const renderScale = throttledDraft?.scale ?? scale;
+
   const toLngLat = useCallback(
     (x: number, z: number): LngLat => {
-      if (anchorLat == null || anchorLng == null) return [0, 0];
-      const { lat, lng } = localToLatLng(x * scale, z * scale, { anchor_lat: anchorLat, anchor_lng: anchorLng }, heading);
+      if (renderAnchorLat == null || renderAnchorLng == null) return [0, 0];
+      const { lat, lng } = localToLatLng(
+        x * renderScale,
+        z * renderScale,
+        { anchor_lat: renderAnchorLat, anchor_lng: renderAnchorLng },
+        renderHeading,
+      );
       return [lng, lat];
     },
-    [anchorLat, anchorLng, heading, scale],
+    [renderAnchorLat, renderAnchorLng, renderHeading, renderScale],
   );
+
+  // N/S/E/W nudge: reuses localToLatLng with heading pinned at 0 so a "1m
+  // north" nudge is always true-north, independent of the floor plan's own
+  // heading — the same meters-to-degrees math as everywhere else, not a
+  // second implementation of it.
+  const nudge = useCallback((direction: "N" | "S" | "E" | "W", meters: number) => {
+    setDraft((d) => {
+      if (!d) return d;
+      const dx = direction === "E" ? meters : direction === "W" ? -meters : 0;
+      const dy = direction === "N" ? -meters : direction === "S" ? meters : 0;
+      const { lat, lng } = localToLatLng(dx, dy, { anchor_lat: d.lat, anchor_lng: d.lng }, 0);
+      return { ...d, lat, lng };
+    });
+  }, []);
+
+  const rotate = useCallback((deltaDeg: number) => {
+    setDraft((d) => (d ? { ...d, heading: ((d.heading + deltaDeg) % 360 + 360) % 360 } : d));
+  }, []);
+
+  const resetDraft = useCallback(() => {
+    if (anchorLat == null || anchorLng == null) return;
+    setDraft({ lat: anchorLat, lng: anchorLng, heading, scale });
+    setSaveError(null);
+  }, [anchorLat, anchorLng, heading, scale]);
+
+  const saveDraft = useCallback(async () => {
+    if (!draft) return;
+    setSaving(true);
+    setSaveError(null);
+    // Same write path Set-location already uses: the browser's own supabase
+    // client, direct table update — buildings is RLS-protected admin-only, so
+    // no separate authorization check is needed here.
+    const patch = { anchor_lat: draft.lat, anchor_lng: draft.lng, heading_deg: draft.heading, scale: draft.scale };
+    const { error } = await supabase.from("buildings").update(patch).eq("id", building.id);
+    setSaving(false);
+    if (error) {
+      setSaveError(error.message);
+      return;
+    }
+    onAnchorSaved?.(patch);
+  }, [draft, building.id, onAnchorSaved]);
+
+  // Arrows nudge 1m (shift = 0.1m), [ and ] rotate 0.5°. Ignored while a
+  // control elsewhere on the page has focus, so this cannot hijack typing.
+  useEffect(() => {
+    if (!aligning) return;
+    function isTypingTarget(el: EventTarget | null): boolean {
+      if (!(el instanceof HTMLElement)) return false;
+      return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable;
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (isTypingTarget(e.target)) return;
+      const meters = e.shiftKey ? 0.1 : 1;
+      switch (e.key) {
+        case "ArrowUp": e.preventDefault(); nudge("N", meters); break;
+        case "ArrowDown": e.preventDefault(); nudge("S", meters); break;
+        case "ArrowLeft": e.preventDefault(); nudge("W", meters); break;
+        case "ArrowRight": e.preventDefault(); nudge("E", meters); break;
+        case "[": e.preventDefault(); rotate(-0.5); break;
+        case "]": e.preventDefault(); rotate(0.5); break;
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [aligning, nudge, rotate]);
 
   const floorIndex = useCallback(
     (floorId: string) => {
@@ -472,7 +609,118 @@ export function BuildingFocusView({
         </div>
       )}
 
+      {canEdit && (
+        <button
+          type="button"
+          onClick={() => setAligning((a) => !a)}
+          className={`absolute right-3 top-3 z-10 rounded-md border border-hairline px-2.5 py-1.5 text-xs font-semibold shadow-sm ${
+            aligning ? "bg-critical text-white" : "bg-surface/95 text-ink-2"
+          }`}
+        >
+          {aligning ? "Exit align" : dirty ? "Align •" : "Align"}
+        </button>
+      )}
+
+      {aligning && draft && (
+        <div className="absolute left-3 top-14 z-10 w-64 space-y-3 rounded-lg border border-hairline bg-surface/95 p-3 text-xs shadow-lg backdrop-blur">
+          <p className="text-sm font-semibold">Align overlay to shell</p>
+
+          <label className="block space-y-1">
+            <span className="flex items-center justify-between text-ink-2">
+              <span>Heading</span>
+              <span>{draft.heading.toFixed(1)}°</span>
+            </span>
+            <input
+              aria-label="Heading"
+              type="range"
+              min={0}
+              max={360}
+              step={0.5}
+              value={draft.heading}
+              onChange={(e) => setDraft((d) => (d ? { ...d, heading: Number(e.target.value) } : d))}
+              className="w-full accent-[var(--color-critical)]"
+            />
+          </label>
+
+          <div className="grid grid-cols-2 gap-2">
+            <NudgePad label="1m" meters={1} onNudge={nudge} />
+            <NudgePad label="0.1m" meters={0.1} onNudge={nudge} />
+          </div>
+
+          <label className="block space-y-1">
+            <span className="text-ink-2">Scale</span>
+            <input
+              aria-label="Scale"
+              type="number"
+              min={0.5}
+              max={2}
+              step={0.01}
+              value={draft.scale}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (Number.isFinite(v)) setDraft((d) => (d ? { ...d, scale: Math.min(2, Math.max(0.5, v)) } : d));
+              }}
+              className="w-full rounded-md border border-hairline bg-surface-2 px-2 py-1.5"
+            />
+          </label>
+
+          {saveError && <p className="text-critical">{saveError}</p>}
+          {!saveError && dirty && <p className="text-ink-3">Unsaved changes.</p>}
+
+          <div className="flex gap-2 pt-1">
+            <button
+              type="button"
+              disabled={!dirty || saving}
+              onClick={saveDraft}
+              className="flex-1 rounded-md bg-critical px-2.5 py-1.5 font-semibold text-white disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              disabled={!dirty}
+              onClick={resetDraft}
+              className="rounded-md border border-hairline bg-surface-2 px-2.5 py-1.5 font-medium disabled:opacity-40"
+            >
+              Reset
+            </button>
+          </div>
+
+          <p className="text-ink-3">
+            Arrows nudge 1m (shift = 0.1m) · <kbd>[</kbd>/<kbd>]</kbd> rotate
+          </p>
+        </div>
+      )}
+
       <div ref={containerRef} className="h-[520px] w-full" />
+    </div>
+  );
+}
+
+function NudgePad({
+  label,
+  meters,
+  onNudge,
+}: {
+  label: string;
+  meters: number;
+  onNudge: (direction: "N" | "S" | "E" | "W", meters: number) => void;
+}) {
+  const cell = "flex h-6 w-6 items-center justify-center rounded border border-hairline bg-surface-2 text-ink-2 hover:border-ink-3";
+  return (
+    <div className="space-y-1">
+      <p className="text-center text-ink-3">{label}</p>
+      <div className="grid grid-cols-3 grid-rows-3 place-items-center gap-0.5">
+        <span />
+        <button type="button" aria-label={`Nudge north ${label}`} className={cell} onClick={() => onNudge("N", meters)}>↑</button>
+        <span />
+        <button type="button" aria-label={`Nudge west ${label}`} className={cell} onClick={() => onNudge("W", meters)}>←</button>
+        <span />
+        <button type="button" aria-label={`Nudge east ${label}`} className={cell} onClick={() => onNudge("E", meters)}>→</button>
+        <span />
+        <button type="button" aria-label={`Nudge south ${label}`} className={cell} onClick={() => onNudge("S", meters)}>↓</button>
+        <span />
+      </div>
     </div>
   );
 }

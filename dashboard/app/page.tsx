@@ -431,6 +431,9 @@ function Console({ session, onSignOut }: { session: Session; onSignOut: () => vo
                 onFootprintCached={(patch) =>
                   setBuildings((prev) => prev.map((b) => (b.id === building.id ? { ...b, ...patch } : b)))
                 }
+                onAnchorSaved={(patch) =>
+                  setBuildings((prev) => prev.map((b) => (b.id === building.id ? { ...b, ...patch } : b)))
+                }
               />
             ) : null}
             <div className="grid gap-4 md:grid-cols-2 xl:hidden">
