@@ -1,3 +1,50 @@
 @import "tailwindcss";
-:root { color-scheme: dark; }
-body { background: #09090b; color: #fafafa; }
+
+/* The same vocabulary the iOS app uses, so the two surfaces read as one
+   product: charcoal ground, red reserved for hazards and destructive actions,
+   green for confirmed-available, amber for degraded-but-working. */
+@theme {
+  --color-ground: #0d0e11;
+  --color-surface: #16181d;
+  --color-surface-2: #1d2027;
+  --color-hairline: #2a2e37;
+  --color-ink: #f2f3f5;
+  --color-ink-2: #a1a7b3;
+  --color-ink-3: #6b7280;
+
+  --color-critical: #de1c18;
+  --color-critical-dim: #3a1211;
+  --color-caution: #f2a32a;
+  --color-caution-dim: #3a2c10;
+  --color-safe: #29b873;
+  --color-safe-dim: #0f2c20;
+  --color-info: #3f8cff;
+  --color-info-dim: #0f1f38;
+}
+
+html,
+body {
+  background: var(--color-ground);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui,
+    sans-serif;
+}
+
+/* Focus that is visible on a dark ground without shouting. */
+:where(button, select, input, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: 2px;
+}
+
+/* Node captions on the map must stay legible over route lines. */
+.map-label {
+  paint-order: stroke fill;
+  stroke: var(--color-ground);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}

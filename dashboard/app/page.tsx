@@ -4,11 +4,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import {
   supabase,
+  type AuditEntry,
   type Building,
   type LiveEdgeState,
+  type MapVersion,
+  type Profile,
   type RouteEdge,
   type RouteNode,
+  type UserReport,
 } from "@/lib/supabase";
+import { type EdgeStatus, type HazardType } from "@/lib/model";
+import { GraphView } from "./graph";
+import { ActiveIncidents, ActivityFeed, Badge, Inspector, PendingReports } from "./panels";
 
 type Conn = "connecting" | "live" | "error" | "idle";
 
@@ -25,18 +32,27 @@ export default function Page() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  if (!ready) return <Centered>Loading…</Centered>;
+  if (!ready) {
+    return (
+      <main className="flex min-h-screen items-center justify-center text-ink-2">Loading…</main>
+    );
+  }
   if (!session) return <LoginForm />;
-  return <Console onSignOut={() => supabase.auth.signOut()} />;
+  return <Console session={session} onSignOut={() => supabase.auth.signOut()} />;
 }
 
-function Centered({ children }: { children: React.ReactNode }) {
-  return <div className="flex min-h-screen items-center justify-center text-zinc-400">{children}</div>;
+function Wordmark({ className = "" }: { className?: string }) {
+  return (
+    <span className={`flex items-baseline gap-1.5 ${className}`}>
+      <span className="font-extrabold tracking-[0.18em]">EGRESS</span>
+      <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-critical" />
+    </span>
+  );
 }
 
 function LoginForm() {
   const [email, setEmail] = useState("admin@egress.test");
-  const [password, setPassword] = useState("egress-admin-pw");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -50,47 +66,60 @@ function LoginForm() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center p-6">
-      <form onSubmit={submit} className="w-full max-w-sm space-y-4 rounded-xl border border-zinc-800 bg-zinc-950 p-6">
-        <div>
-          <h1 className="text-2xl font-bold">EGRESS Admin</h1>
-          <p className="text-sm text-zinc-500">Live building state</p>
+    <main className="flex min-h-screen items-center justify-center p-6">
+      <form onSubmit={submit} className="w-full max-w-sm space-y-5 rounded-2xl border border-hairline bg-surface p-7">
+        <div className="space-y-1">
+          <Wordmark className="text-2xl" />
+          <p className="text-sm text-ink-2">Emergency command console</p>
         </div>
-        <input
-          className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm"
-          type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email"
-        />
-        <input
-          className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm"
-          type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password"
-        />
-        {error && <p className="text-sm text-red-400">{error}</p>}
+        <label className="block space-y-1.5">
+          <span className="text-xs font-medium text-ink-2">Email</span>
+          <input
+            className="w-full rounded-md border border-hairline bg-surface-2 px-3 py-2.5 text-sm"
+            type="email" autoComplete="username" value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </label>
+        <label className="block space-y-1.5">
+          <span className="text-xs font-medium text-ink-2">Password</span>
+          <input
+            className="w-full rounded-md border border-hairline bg-surface-2 px-3 py-2.5 text-sm"
+            type="password" autoComplete="current-password" value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+        {error && (
+          <p className="rounded-md border border-critical/40 bg-critical-dim px-3 py-2 text-sm text-critical">
+            {error}
+          </p>
+        )}
         <button
-          disabled={busy}
-          className="w-full rounded-md bg-emerald-600 px-3 py-2 text-sm font-semibold disabled:opacity-50"
+          disabled={busy || !password}
+          className="w-full rounded-md bg-critical px-3 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
         >
           {busy ? "Signing in…" : "Sign in"}
         </button>
-        <p className="text-xs text-zinc-600">
-          Local demo credentials come from <code>supabase/seed.sql</code>.
-        </p>
       </form>
-    </div>
+    </main>
   );
 }
 
-function Console({ onSignOut }: { onSignOut: () => void }) {
+function Console({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [buildingID, setBuildingID] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [mapVersion, setMapVersion] = useState<MapVersion | null>(null);
   const [nodes, setNodes] = useState<RouteNode[]>([]);
   const [edges, setEdges] = useState<RouteEdge[]>([]);
   const [live, setLive] = useState<Record<string, LiveEdgeState>>({});
+  const [reports, setReports] = useState<UserReport[]>([]);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [conn, setConn] = useState<Conn>("idle");
   const [selected, setSelected] = useState<RouteEdge | null>(null);
-  const [reason, setReason] = useState("");
-  const [floor, setFloor] = useState<string>("all");
+  const [floor, setFloor] = useState("all");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [busyReport, setBusyReport] = useState<string | null>(null);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   const revision = useMemo(
@@ -98,66 +127,55 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
     [live],
   );
 
-  // Buildings
   useEffect(() => {
-    supabase.from("buildings").select("*").order("name").then(({ data, error }) => {
-      if (error) return setError(error.message);
-      setBuildings(data ?? []);
-      if (data?.length && !buildingID) setBuildingID(data[0].id);
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    void (async () => {
+      const [b, p] = await Promise.all([
+        supabase.from("buildings").select("*").order("name"),
+        supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle(),
+      ]);
+      if (b.error) setError(b.error.message);
+      setBuildings(b.data ?? []);
+      setBuildingID((current) => current ?? b.data?.[0]?.id ?? null);
+      setProfile(p.data ?? null);
+    })();
+  }, [session.user.id]);
 
   const building = buildings.find((b) => b.id === buildingID) ?? null;
 
-  // Removes the building and, by cascade, every version of its map, its
-  // artifacts and its live closures. delete_building() re-checks authorization
-  // server-side, so an occupant reaching this code still gets refused.
-  async function deleteBuilding() {
+  const loadBuilding = useCallback(async () => {
     if (!building) return;
-    const confirmed = window.confirm(
-      `Delete "${building.name}"?\n\n` +
-        "This permanently removes the building, every published version of its map " +
-        "and its live closures, for everyone in your organization. Occupants will " +
-        "no longer see it. This cannot be undone.",
-    );
-    if (!confirmed) return;
-
-    setDeleting(true);
-    setError(null);
-    const { error } = await supabase.rpc("delete_building", { p_building_id: building.id });
-    setDeleting(false);
-    if (error) return setError(error.message);
-
-    const remaining = buildings.filter((b) => b.id !== building.id);
-    setBuildings(remaining);
-    setBuildingID(remaining[0]?.id ?? null);
-  }
-
-  // Graph + live state for the selected building
-  const loadGraph = useCallback(async () => {
-    if (!building?.active_map_version_id) {
-      setNodes([]); setEdges([]);
+    setSelected(null);
+    if (!building.active_map_version_id) {
+      setNodes([]); setEdges([]); setMapVersion(null);
       return;
     }
     const mv = building.active_map_version_id;
-    const [n, e, l] = await Promise.all([
+    const [n, e, l, r, a, v] = await Promise.all([
       supabase.from("route_nodes").select("*").eq("map_version_id", mv),
       supabase.from("route_edges").select("*").eq("map_version_id", mv),
       supabase.from("live_edge_states").select("*").eq("building_id", building.id),
+      supabase.from("user_reports").select("*").eq("building_id", building.id)
+        .eq("status", "pending").order("created_at", { ascending: false }),
+      supabase.from("live_state_audit").select("*").eq("building_id", building.id)
+        .order("created_at", { ascending: false }).limit(25),
+      supabase.from("map_versions").select("id,version,status,published_at").eq("id", mv).maybeSingle(),
     ]);
-    if (n.error || e.error || l.error) {
-      setError(n.error?.message ?? e.error?.message ?? l.error?.message ?? null);
-      return;
-    }
+    const first = [n, e, l].find((x) => x.error);
+    if (first?.error) return setError(first.error.message);
     setNodes(n.data ?? []);
     setEdges(e.data ?? []);
     setLive(Object.fromEntries((l.data ?? []).map((s: LiveEdgeState) => [s.edge_stable_id, s])));
+    // Reports and audit are admin-only reads; an occupant signing in here simply
+    // sees empty panels rather than an error.
+    setReports(r.data ?? []);
+    setAudit(a.data ?? []);
+    setMapVersion(v.data ?? null);
   }, [building]);
 
-  useEffect(() => { void loadGraph(); }, [loadGraph]);
+  useEffect(() => { void loadBuilding(); }, [loadBuilding]);
 
-  // Realtime — resubscribe when the building changes.
+  // Realtime. The snapshot loaded above is authoritative; events only advance
+  // it, and anything at or below a revision we already hold is ignored.
   useEffect(() => {
     if (!buildingID) return;
     if (channelRef.current) void supabase.removeChannel(channelRef.current);
@@ -173,19 +191,40 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
           if (!row?.edge_stable_id) return;
           setLive((prev) => {
             const existing = prev[row.edge_stable_id];
-            // Ignore anything we have already applied.
             if (existing && row.revision <= existing.revision) return prev;
             return { ...prev, [row.edge_stable_id]: row };
           });
+          void refreshActivity(buildingID);
         },
       )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "user_reports", filter: `building_id=eq.${buildingID}` },
+        () => void refreshReports(buildingID),
+      )
       .subscribe((status) => {
-        setConn(status === "SUBSCRIBED" ? "live" : status === "CHANNEL_ERROR" || status === "TIMED_OUT" ? "error" : "connecting");
+        setConn(
+          status === "SUBSCRIBED" ? "live"
+          : status === "CHANNEL_ERROR" || status === "TIMED_OUT" ? "error"
+          : "connecting",
+        );
       });
 
     channelRef.current = channel;
     return () => { void supabase.removeChannel(channel); };
   }, [buildingID]);
+
+  async function refreshReports(id: string) {
+    const { data } = await supabase.from("user_reports").select("*").eq("building_id", id)
+      .eq("status", "pending").order("created_at", { ascending: false });
+    setReports(data ?? []);
+  }
+
+  async function refreshActivity(id: string) {
+    const { data } = await supabase.from("live_state_audit").select("*").eq("building_id", id)
+      .order("created_at", { ascending: false }).limit(25);
+    setAudit(data ?? []);
+  }
 
   const nodeByStable = useMemo(
     () => Object.fromEntries(nodes.map((n) => [n.stable_id, n])),
@@ -204,228 +243,166 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
     return a && b && (floor === "all" || (a.floor_id === floor && b.floor_id === floor));
   });
 
-  async function setStatus(edge: RouteEdge, status: "available" | "blocked") {
-    if (!building) return;
+  async function publish(input: {
+    status: Exclude<EdgeStatus, "available">;
+    hazard: HazardType;
+    reason: string;
+    severity: number;
+    expiresAt: string | null;
+  }) {
+    if (!building || !selected) return;
+    setBusy(true);
     setError(null);
-    const { error } =
-      status === "available"
-        ? await supabase.rpc("clear_edge_state", {
-            p_building_id: building.id,
-            p_edge_stable_id: edge.stable_id,
-          })
-        : await supabase.rpc("set_edge_state", {
-            p_building_id: building.id,
-            p_edge_stable_id: edge.stable_id,
-            p_status: "blocked",
-            p_hazard_type: "blockedHallway",
-            p_reason: reason || "Blocked by administrator",
-            p_severity: 5,
-            p_expires_at: null,
-          });
+    const { error } = await supabase.rpc("set_edge_state", {
+      p_building_id: building.id,
+      p_edge_stable_id: selected.stable_id,
+      p_status: input.status,
+      p_hazard_type: input.hazard,
+      p_reason: input.reason || null,
+      p_severity: input.severity,
+      p_expires_at: input.expiresAt,
+    });
+    setBusy(false);
     if (error) setError(error.message);
   }
 
-  // Demo control — only offered when such an element actually exists.
-  const demoEdge = useMemo(() => {
-    return edges.find((e) => {
-      const a = nodeByStable[e.from_node_stable_id];
-      const b = nodeByStable[e.to_node_stable_id];
-      return /stair/i.test(a?.name ?? "") || /stair/i.test(b?.name ?? "");
-    }) ?? null;
-  }, [edges, nodeByStable]);
+  async function clear() {
+    if (!building || !selected) return;
+    setBusy(true);
+    setError(null);
+    const { error } = await supabase.rpc("clear_edge_state", {
+      p_building_id: building.id,
+      p_edge_stable_id: selected.stable_id,
+    });
+    setBusy(false);
+    if (error) setError(error.message);
+  }
 
-  const demoBlocked = demoEdge ? live[demoEdge.stable_id]?.status === "blocked" : false;
+  // Verification goes through review_report, which writes the building-wide
+  // live state in the same transaction. The dashboard never publishes the
+  // hazard itself, so a report can never be marked reviewed without its
+  // closure landing.
+  async function review(report: UserReport, status: "verified" | "rejected") {
+    setBusyReport(report.id);
+    setError(null);
+    const { error } = await supabase.rpc("review_report", {
+      p_report_id: report.id,
+      p_status: status,
+      p_hazard_type: report.report_type,
+      p_reason: report.description,
+      p_severity: 4,
+    });
+    setBusyReport(null);
+    if (error) return setError(error.message);
+    setReports((prev) => prev.filter((r) => r.id !== report.id));
+  }
+
+  const connMeta =
+    conn === "live" ? { tone: "safe" as const, label: "Live" }
+    : conn === "error" ? { tone: "critical" as const, label: "Disconnected" }
+    : { tone: "caution" as const, label: "Connecting…" };
 
   return (
-    <div className="mx-auto max-w-6xl space-y-4 p-6">
-      <header className="flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-bold">EGRESS Admin</h1>
-        <span className={`rounded-full px-2 py-0.5 text-xs ${
-          conn === "live" ? "bg-emerald-900 text-emerald-300"
-          : conn === "error" ? "bg-red-900 text-red-300"
-          : "bg-amber-900 text-amber-300"}`}>
-          Realtime: {conn}
-        </span>
-        <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">revision {revision}</span>
-        <div className="ml-auto flex items-center gap-2">
-          <select
-            className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sm"
-            value={buildingID ?? ""} onChange={(e) => setBuildingID(e.target.value)}
-          >
-            {buildings.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-          </select>
-          <select
-            className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sm"
-            value={floor} onChange={(e) => setFloor(e.target.value)}
-          >
-            <option value="all">All floors</option>
-            {floors.map((f) => <option key={f} value={f}>{f}</option>)}
-          </select>
-          <button
-            onClick={deleteBuilding}
-            disabled={!building || deleting}
-            title="Delete this building and all of its map versions"
-            className="rounded-md border border-red-900 px-2 py-1 text-sm text-red-300 disabled:opacity-40"
-          >
-            {deleting ? "Deleting…" : "Delete building"}
-          </button>
-          <button onClick={onSignOut} className="rounded-md border border-zinc-800 px-2 py-1 text-sm">Sign out</button>
+    <div className="min-h-screen">
+      <header className="sticky top-0 z-10 border-b border-hairline bg-ground/95 backdrop-blur">
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-4 gap-y-3 px-5 py-3">
+          <Wordmark className="text-lg" />
+
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Building"
+              className="rounded-md border border-hairline bg-surface-2 px-2.5 py-1.5 text-sm"
+              value={buildingID ?? ""}
+              onChange={(e) => setBuildingID(e.target.value)}
+            >
+              {buildings.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              {!buildings.length && <option value="">No buildings</option>}
+            </select>
+            <select
+              aria-label="Floor"
+              className="rounded-md border border-hairline bg-surface-2 px-2.5 py-1.5 text-sm"
+              value={floor}
+              onChange={(e) => setFloor(e.target.value)}
+            >
+              <option value="all">All floors</option>
+              {floors.map((f) => <option key={f} value={f}>{f}</option>)}
+            </select>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={connMeta.tone}>
+              <span aria-hidden>{conn === "live" ? "◉" : conn === "error" ? "✕" : "◌"}</span>
+              {connMeta.label}
+            </Badge>
+            {mapVersion && <Badge tone="neutral">Map v{mapVersion.version}</Badge>}
+          </div>
+
+          <div className="ml-auto flex items-center gap-3">
+            <span className="hidden text-right text-xs leading-tight sm:block">
+              <span className="block font-medium">{profile?.display_name ?? session.user.email}</span>
+              <span className="block text-ink-3 capitalize">{profile?.role ?? "unknown role"}</span>
+            </span>
+            <button
+              onClick={onSignOut}
+              className="rounded-md border border-hairline px-3 py-1.5 text-sm text-ink-2"
+            >
+              Sign out
+            </button>
+          </div>
         </div>
       </header>
 
-      {error && <p className="rounded-md bg-red-950 p-3 text-sm text-red-300">{error}</p>}
+      <main className="mx-auto max-w-[1600px] space-y-4 p-5">
+        {error && (
+          <p role="alert" className="rounded-lg border border-critical/40 bg-critical-dim px-4 py-3 text-sm text-critical">
+            {error}
+          </p>
+        )}
 
-      {demoEdge && (
-        <button
-          onClick={() => setStatus(demoEdge, demoBlocked ? "available" : "blocked")}
-          className={`w-full rounded-lg px-4 py-3 text-sm font-bold ${
-            demoBlocked ? "bg-emerald-600" : "bg-red-600"}`}
-        >
-          {demoBlocked ? "Clear " : "Block "}
-          {nodeByStable[demoEdge.from_node_stable_id]?.name} → {nodeByStable[demoEdge.to_node_stable_id]?.name}
-        </button>
-      )}
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
+          <div className="space-y-4">
+            <GraphView
+              nodes={visibleNodes}
+              edges={visibleEdges}
+              nodeByStable={nodeByStable}
+              live={live}
+              selected={selected}
+              onSelect={setSelected}
+            />
+            <div className="grid gap-4 md:grid-cols-2 xl:hidden">
+              <ActiveIncidents live={live} edges={edges} nodeByStable={nodeByStable} onSelect={setSelected} />
+              <ActivityFeed entries={audit} edges={edges} nodeByStable={nodeByStable} />
+            </div>
+          </div>
 
-      <div className="grid gap-4 md:grid-cols-[2fr_1fr]">
-        <GraphView
-          nodes={visibleNodes}
-          edges={visibleEdges}
-          nodeByStable={nodeByStable}
-          live={live}
-          selected={selected}
-          onSelect={setSelected}
-        />
+          <div className="space-y-4">
+            <Inspector
+              edge={selected}
+              nodeByStable={nodeByStable}
+              state={selected ? live[selected.stable_id] : undefined}
+              onPublish={publish}
+              onClear={clear}
+              busy={busy}
+            />
+            <PendingReports
+              reports={reports}
+              nodeByStable={nodeByStable}
+              edges={edges}
+              onReview={review}
+              busyID={busyReport}
+            />
+            <div className="hidden space-y-4 xl:block">
+              <ActiveIncidents live={live} edges={edges} nodeByStable={nodeByStable} onSelect={setSelected} />
+              <ActivityFeed entries={audit} edges={edges} nodeByStable={nodeByStable} />
+            </div>
+          </div>
+        </div>
 
-        <aside className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="font-semibold">Segment</h2>
-          {!selected && <p className="text-sm text-zinc-500">Click a line on the map to edit its status.</p>}
-          {selected && (
-            <>
-              <p className="text-sm">
-                {nodeByStable[selected.from_node_stable_id]?.name} →{" "}
-                {nodeByStable[selected.to_node_stable_id]?.name}
-              </p>
-              <p className="text-xs text-zinc-500">
-                {selected.distance_meters} m
-                {selected.contains_stairs && " · stairs"}
-                {selected.requires_elevator && " · elevator"}
-                {!selected.wheelchair_accessible && " · not step-free"}
-              </p>
-              <p className="text-xs">
-                Status:{" "}
-                <span className={live[selected.stable_id]?.status === "blocked" ? "text-red-400" : "text-emerald-400"}>
-                  {live[selected.stable_id]?.status ?? "available"}
-                </span>
-                {live[selected.stable_id] && ` · rev ${live[selected.stable_id].revision}`}
-              </p>
-              <input
-                className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sm"
-                placeholder="Reason (optional)"
-                value={reason} onChange={(e) => setReason(e.target.value)}
-              />
-              <div className="flex gap-2">
-                <button onClick={() => setStatus(selected, "blocked")}
-                  className="flex-1 rounded-md bg-red-600 px-3 py-2 text-sm font-semibold">Block</button>
-                <button onClick={() => setStatus(selected, "available")}
-                  className="flex-1 rounded-md bg-emerald-600 px-3 py-2 text-sm font-semibold">Clear</button>
-              </div>
-            </>
-          )}
-
-          <h2 className="pt-2 font-semibold">Active blocks</h2>
-          <ul className="space-y-1 text-xs">
-            {Object.values(live).filter((s) => s.status !== "available").map((s) => {
-              const e = edges.find((x) => x.stable_id === s.edge_stable_id);
-              return (
-                <li key={s.edge_stable_id} className="text-red-300">
-                  {e ? `${nodeByStable[e.from_node_stable_id]?.name} → ${nodeByStable[e.to_node_stable_id]?.name}` : s.edge_stable_id}
-                  {s.reason && ` — ${s.reason}`}
-                </li>
-              );
-            })}
-            {Object.values(live).every((s) => s.status === "available") && (
-              <li className="text-zinc-600">None</li>
-            )}
-          </ul>
-        </aside>
-      </div>
-    </div>
-  );
-}
-
-/** Top-down SVG of the graph using the stored node positions (X/Z plane). */
-function GraphView({
-  nodes, edges, nodeByStable, live, selected, onSelect,
-}: {
-  nodes: RouteNode[];
-  edges: RouteEdge[];
-  nodeByStable: Record<string, RouteNode>;
-  live: Record<string, LiveEdgeState>;
-  selected: RouteEdge | null;
-  onSelect: (e: RouteEdge) => void;
-}) {
-  if (!nodes.length) {
-    return (
-      <div className="flex h-96 items-center justify-center rounded-xl border border-zinc-800 text-sm text-zinc-500">
-        No published map for this building.
-      </div>
-    );
-  }
-
-  const pad = 40;
-  const xs = nodes.map((n) => n.position.x);
-  const zs = nodes.map((n) => n.position.z);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minZ = Math.min(...zs), maxZ = Math.max(...zs);
-  const w = 700, h = 420;
-  const sx = (maxX - minX) || 1, sz = (maxZ - minZ) || 1;
-  const scale = Math.min((w - pad * 2) / sx, (h - pad * 2) / sz);
-  const px = (x: number) => pad + (x - minX) * scale;
-  const pz = (z: number) => pad + (z - minZ) * scale;
-
-  const color = (t: string) =>
-    t === "exit" ? "#22c55e" : t === "stairwell" ? "#a855f7" : t === "elevator" ? "#14b8a6"
-    : t === "room" ? "#3b82f6" : t === "refugeArea" ? "#2dd4bf" : "#f97316";
-
-  return (
-    <div className="overflow-x-auto rounded-xl border border-zinc-800 bg-zinc-950 p-2">
-      <svg viewBox={`0 0 ${w} ${h}`} className="w-full">
-        {edges.map((e) => {
-          const a = nodeByStable[e.from_node_stable_id];
-          const b = nodeByStable[e.to_node_stable_id];
-          if (!a || !b) return null;
-          const blocked = live[e.stable_id]?.status === "blocked";
-          const isSel = selected?.stable_id === e.stable_id;
-          return (
-            <g key={e.stable_id} onClick={() => onSelect(e)} className="cursor-pointer">
-              <line
-                x1={px(a.position.x)} y1={pz(a.position.z)}
-                x2={px(b.position.x)} y2={pz(b.position.z)}
-                stroke={blocked ? "#ef4444" : isSel ? "#facc15" : "#52525b"}
-                strokeWidth={isSel ? 6 : 4}
-                strokeDasharray={blocked ? "8 6" : undefined}
-              />
-              {/* Wider invisible hit area so thin lines are still clickable. */}
-              <line
-                x1={px(a.position.x)} y1={pz(a.position.z)}
-                x2={px(b.position.x)} y2={pz(b.position.z)}
-                stroke="transparent" strokeWidth={18}
-              />
-            </g>
-          );
-        })}
-        {nodes.map((n) => (
-          <g key={n.stable_id}>
-            <circle cx={px(n.position.x)} cy={pz(n.position.z)} r={8} fill={color(n.type)} />
-            <text
-              x={px(n.position.x)} y={pz(n.position.z) - 14}
-              textAnchor="middle" fontSize="11" fill="#d4d4d8"
-            >
-              {n.name}
-            </text>
-          </g>
-        ))}
-      </svg>
+        <p className="pt-2 text-xs text-ink-3">
+          Experimental prototype. Live state advises the EGRESS apps; it does not replace
+          building fire-alarm or life-safety systems. Revision {revision}.
+        </p>
+      </main>
     </div>
   );
 }
