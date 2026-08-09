@@ -149,6 +149,11 @@ struct ConfigureView: View {
                 } label: {
                     Label("Saved Maps & Route Testing", systemImage: "map")
                 }
+                NavigationLink {
+                    ActiveHazardsView()
+                } label: {
+                    Label("Active Hazards", systemImage: "exclamationmark.triangle")
+                }
             }
 
             Section {
