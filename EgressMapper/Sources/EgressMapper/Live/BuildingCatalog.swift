@@ -244,8 +244,11 @@ enum BuildingCatalogMerger {
             )
         }
 
-        // Zones that were never published stay visible to their mapper only.
-        if profile.canManageBuildings {
+        // Zones that were never published stay visible to their mapper, and to
+        // a signed-out device: these are recordings made on this phone, and
+        // losing sight of them until you sign in would be absurd. Once an
+        // account resolves to an occupant, they are hidden.
+        if profile.canManageBuildings || !profile.hasOrganization {
             for zone in localZones where !claimedZoneIDs.contains(zone.id) {
                 entries.append(
                     BuildingEntry(

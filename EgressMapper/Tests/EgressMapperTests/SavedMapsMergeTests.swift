@@ -62,6 +62,18 @@ final class SavedMapsMergeTests: XCTestCase {
         XCTAssertEqual(draftRow?.availability, .localDraft)
     }
 
+    func testASignedOutDeviceStillSeesItsOwnRecordings() {
+        let entries = BuildingCatalogMerger.merge(
+            remote: [], localZones: [localZone("Half-mapped Hall")],
+            cachedVersion: { _ in nil }, profile: .empty
+        )
+        XCTAssertEqual(
+            entries.count, 1,
+            "a map recorded on this phone must not disappear until someone signs in"
+        )
+        XCTAssertEqual(entries[0].availability, .localDraft)
+    }
+
     func testAStudentNeverSeesLocalDrafts() {
         let entries = BuildingCatalogMerger.merge(
             remote: [], localZones: [localZone("Half-mapped Hall")],
