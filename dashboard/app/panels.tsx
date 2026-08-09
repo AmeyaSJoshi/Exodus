@@ -142,6 +142,8 @@ export function Inspector({
               {(["blocked", "restricted"] as const).map((s) => (
                 <button
                   key={s}
+                  type="button"
+                  aria-pressed={status === s}
                   onClick={() => setStatus(s)}
                   className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition ${
                     status === s ? TONE_CLASS[STATUS_META[s].tone] : "border-hairline bg-surface-2 text-ink-2"
@@ -155,6 +157,7 @@ export function Inspector({
 
           <Field label="Hazard type">
             <select
+              aria-label="Hazard type"
               value={hazard}
               onChange={(e) => setHazard(e.target.value as HazardType)}
               className="w-full rounded-md border border-hairline bg-surface-2 px-3 py-2 text-sm"
@@ -169,6 +172,7 @@ export function Inspector({
 
           <Field label={`Severity — ${severity}`}>
             <input
+              aria-label="Severity"
               type="range"
               min={1}
               max={5}
@@ -180,6 +184,7 @@ export function Inspector({
 
           <Field label="Reason">
             <input
+              aria-label="Reason"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="Visible to occupants"
@@ -189,6 +194,7 @@ export function Inspector({
 
           <Field label="Expires">
             <select
+              aria-label="Expires"
               value={expiresIn}
               onChange={(e) => setExpiresIn(e.target.value)}
               className="w-full rounded-md border border-hairline bg-surface-2 px-3 py-2 text-sm"
@@ -208,6 +214,7 @@ export function Inspector({
 
           <div className="flex gap-2">
             <button
+              type="button"
               disabled={busy}
               onClick={() =>
                 onPublish({
@@ -226,6 +233,7 @@ export function Inspector({
               {busy ? "Publishing…" : "Publish incident"}
             </button>
             <button
+              type="button"
               disabled={busy || current === "available"}
               onClick={onClear}
               className="rounded-md border border-hairline bg-surface-2 px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
@@ -239,12 +247,18 @@ export function Inspector({
   );
 }
 
+/**
+ * Label + control. Deliberately a plain element rather than a `<label>`: a
+ * click anywhere on a label is re-dispatched to the first labelable control
+ * inside it, which swallowed every tap on the Blocked/Restricted buttons.
+ * Controls carry their own `aria-label` instead.
+ */
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="block space-y-1.5">
-      <span className="text-xs font-medium text-ink-2">{label}</span>
+    <div className="space-y-1.5">
+      <span className="block text-xs font-medium text-ink-2">{label}</span>
       {children}
-    </label>
+    </div>
   );
 }
 
@@ -297,6 +311,7 @@ export function PendingReports({
             </p>
             <div className="mt-3 flex gap-2">
               <button
+                type="button"
                 disabled={busyID === r.id}
                 onClick={() => onReview(r, "verified")}
                 className="flex-1 rounded-md bg-critical px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
@@ -304,6 +319,7 @@ export function PendingReports({
                 Verify &amp; publish
               </button>
               <button
+                type="button"
                 disabled={busyID === r.id}
                 onClick={() => onReview(r, "rejected")}
                 className="rounded-md border border-hairline px-3 py-2 text-sm font-medium text-ink-2 disabled:opacity-50"
@@ -342,6 +358,7 @@ export function ActiveIncidents({
           return (
             <li key={s.edge_stable_id}>
               <button
+                type="button"
                 onClick={() => e && onSelect(e)}
                 disabled={!e}
                 className="w-full rounded-lg border border-hairline bg-surface-2 p-3 text-left transition hover:border-ink-3 disabled:opacity-60"
