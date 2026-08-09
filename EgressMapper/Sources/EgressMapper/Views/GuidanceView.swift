@@ -44,6 +44,8 @@ struct GuidanceView: View {
     @State private var showAccessibility = false
     @State private var rerouteNotice: String?
     @State private var rerouteDetail: String?
+    /// Outcome of the last report submission, shown once and dismissible.
+    @State private var reportNotice: String?
     @State private var activeEdges: [RouteEdge] = []
     @State private var showHazardReport = false
     @State private var showVoiceReport = false
@@ -300,12 +302,38 @@ struct GuidanceView: View {
     /// Persists the hazard next to (not inside) the permanent graph, then
     /// recomputes the best exit and swaps the AR geometry.
     private func applyHazard(_ hazard: RouteHazard, to edgeID: UUID) {
+        // The reporting phone protects itself first and unconditionally. It
+        // never waits for an administrator to agree before avoiding what the
+        // person standing there just told it about.
         var active = repository.store.loadHazards(zone.id)
         active.set(hazard, on: edgeID)
         try? repository.store.saveHazards(active, zoneID: zone.id)
         DiagnosticsLog.shared.log("Hazard \(hazard.type.rawValue) on edge \(edgeID)")
         announcer.arrivalCue()
         reroute(for: profile, reason: "\(hazard.type.displayName) reported")
+
+        // Then it tells the building, as a pending report. This changes nothing
+        // for anyone else until an administrator verifies it.
+        submitReport(hazard, edgeID: edgeID)
+    }
+
+    /// Sends the report for review. Published buildings only — a zone mapped
+    /// on this device has no one to review it.
+    private func submitReport(_ hazard: RouteHazard, edgeID: UUID) {
+        guard let liveService, let buildingID = zone.remoteBuildingID else { return }
+        Task {
+            let sent = await liveService.submitReport(
+                buildingID: buildingID,
+                edgeStableID: edgeID,
+                type: hazard.type,
+                description: hazard.description
+            )
+            await MainActor.run {
+                reportNotice = sent
+                    ? "Reported to the building. Your route already avoids it."
+                    : "Saved on this phone. It could not be sent to the building."
+            }
+        }
     }
 
     /// Local graph with local hazards, then the administrator's live state on
@@ -427,6 +455,16 @@ struct GuidanceView: View {
                 .modifier(EGTransition())
             }
 
+            if let reportNotice {
+                EGBanner(
+                    title: reportNotice,
+                    tone: .neutral,
+                    symbol: "paperplane.fill",
+                    onDismiss: { self.reportNotice = nil }
+                )
+                .modifier(EGTransition())
+            }
+
             if let rerouteNotice {
                 EGBanner(
                     title: rerouteNotice,
@@ -513,6 +551,7 @@ struct GuidanceView: View {
         }
         .padding(EG.Space.m)
         .egAnimation(rerouteNotice)
+        .egAnimation(reportNotice)
         .egAnimation(manager.status.isReliable)
         .egAnimation(activeRoute.last?.id)
         // Hide precise AR geometry when ARKit is not confident.

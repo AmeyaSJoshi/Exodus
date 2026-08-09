@@ -202,6 +202,48 @@ final class SupabaseBuildingService: BuildingStateService {
         }
     }
 
+    // MARK: - Occupant reports
+
+    /// Submits an occupant report for administrator review.
+    ///
+    /// Deliberately an insert into `user_reports`, not a live-state write: an
+    /// occupant must never be able to close a corridor for the whole building.
+    /// The reporting phone has already protected itself through its personal
+    /// overlay by the time this runs, so a failure here costs that phone
+    /// nothing — it is reported and swallowed rather than thrown into an
+    /// evacuation.
+    @discardableResult
+    func submitReport(
+        buildingID: UUID,
+        edgeStableID: UUID?,
+        nodeStableID: UUID? = nil,
+        type: RouteHazardType,
+        description: String?
+    ) async -> Bool {
+        guard let client else { return false }
+        struct NewReport: Encodable {
+            let building_id: String
+            let edge_stable_id: String?
+            let node_stable_id: String?
+            let report_type: String
+            let description: String?
+        }
+        do {
+            try await client.from("user_reports").insert(NewReport(
+                building_id: buildingID.uuidString,
+                edge_stable_id: edgeStableID?.uuidString,
+                node_stable_id: nodeStableID?.uuidString,
+                report_type: type.rawValue,
+                description: description
+            )).execute()
+            DiagnosticsLog.shared.log("Report submitted: \(type.rawValue)")
+            return true
+        } catch {
+            DiagnosticsLog.shared.log("Report submission failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     // MARK: - BuildingStateService
 
     func fetchSnapshot(buildingID: UUID) async throws -> BuildingStateSnapshot {
