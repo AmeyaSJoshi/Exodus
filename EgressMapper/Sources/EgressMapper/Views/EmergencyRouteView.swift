@@ -27,6 +27,23 @@ struct EmergencyRouteView: View {
                 Section {
                     Label(routeError, systemImage: "exclamationmark.octagon.fill")
                         .foregroundStyle(.red)
+
+                    // An accessibility constraint blocking every path is
+                    // recoverable — offer the way out instead of dead-ending.
+                    if profile.hasAccessibilityConstraints {
+                        Text("Active constraints: \(profile.constraintSummary ?? "none").")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button(role: .destructive) {
+                            profile = NavigationProfile(
+                                audioGuidanceEnabled: profile.audioGuidanceEnabled,
+                                hapticGuidanceEnabled: profile.hapticGuidanceEnabled
+                            )
+                        } label: {
+                            Label("Clear constraints and use the standard route", systemImage: "arrow.counterclockwise")
+                        }
+                    }
+
                     Text("Follow posted evacuation signage and staff instructions.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
