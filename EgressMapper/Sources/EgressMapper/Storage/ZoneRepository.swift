@@ -19,8 +19,11 @@ final class ZoneRepository {
     func refresh() async {
         isLoading = true
         let store = self.store
+        // One pass. `listZones` and `damagedZoneIDs` each enumerated the
+        // directory and decoded every `zone.json`, so a launch decoded all of
+        // them twice.
         let result = await Task.detached(priority: .userInitiated) {
-            (zones: store.listZones(), damaged: store.damagedZoneIDs())
+            store.scanZones()
         }.value
         zones = result.zones
         damagedZoneIDs = result.damaged

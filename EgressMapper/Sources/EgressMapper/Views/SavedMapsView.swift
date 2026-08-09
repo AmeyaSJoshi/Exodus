@@ -9,6 +9,7 @@ import SwiftUI
 /// view never decides what a role may do.
 struct SavedMapsView: View {
     @Environment(ZoneRepository.self) private var repository
+    @Environment(StartupCoordinator.self) private var startup
     @Bindable var session: BackendSession
 
     @State private var openZone: MappingZone?
@@ -98,9 +99,9 @@ struct SavedMapsView: View {
         .navigationTitle("Saved Maps")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await reload() }
-        .task { await reload() }
+        .task { startup.start(repository: repository, session: session) }
         .onChange(of: session.isSignedIn) { _, signedIn in
-            if signedIn { Task { await reload() } }
+            if signedIn { startup.authenticationChanged(session: session) }
         }
         .navigationDestination(item: $openZone) { zone in
             RouteSetupView(zone: zone)
@@ -155,9 +156,11 @@ struct SavedMapsView: View {
         }
     }
 
+    /// Pull-to-refresh is an explicit user request, so it bypasses the
+    /// coalescing window; view appearance goes through the coordinator.
     private func reload() async {
-        await repository.refresh()
-        await session.refresh()
+        startup.loadLocal(repository: repository, session: session)
+        startup.refreshRemote(session: session, force: true)
     }
 
     private func perform(_ action: BuildingAction, on entry: BuildingEntry) {
