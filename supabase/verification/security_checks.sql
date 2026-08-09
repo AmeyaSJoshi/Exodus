@@ -773,10 +773,53 @@ end $$;
 reset role;
 
 -- MARK: Deleting a building --------------------------------------------------
+--
+-- These tests destroy the building they act on, so they build their own
+-- disposable one (the `99999999-…` fixture) rather than the seeded Wade
+-- Academic Center. Running the checks used to delete that seed row, which left
+-- the dashboard with no building until the next `db:reset` — verification must
+-- observe the database, not damage it.
+--
+-- The fixture is inserted here with the session's own privileges (no `set
+-- role`), exactly as seed.sql does, so it does not depend on any RPC.
 
 do $$
 declare
-    bldg    uuid := '33333333-3333-3333-3333-333333333333';
+    bldg uuid := '99999999-9999-9999-9999-999999999999';
+    mapv uuid := '99999999-9999-9999-9999-999999999998';
+    n_a  uuid := '99999999-9999-9999-9999-999999999991';
+    n_b  uuid := '99999999-9999-9999-9999-999999999992';
+    e_ab uuid := '99999999-9999-9999-9999-999999999993';
+    org  uuid := '11111111-1111-1111-1111-111111111111';
+    who  uuid := '55555555-5555-5555-5555-555555555551';
+begin
+    insert into public.buildings (id, organization_id, name, address, status, created_by)
+    values (bldg, org, 'Disposable Delete Fixture', '9 Fixture Way', 'published', who);
+
+    insert into public.map_versions (id, building_id, version, status, created_by, published_at)
+    values (mapv, bldg, 1, 'published', who, now());
+
+    insert into public.route_nodes (map_version_id, stable_id, floor_id, name, type, position) values
+        (mapv, n_a, 'floor-1', 'Fixture Room', 'room', '{"x":0,"y":0,"z":0}'),
+        (mapv, n_b, 'floor-1', 'Fixture Exit', 'exit', '{"x":5,"y":0,"z":0}');
+
+    insert into public.route_edges (map_version_id, stable_id, from_node_stable_id, to_node_stable_id, distance_meters)
+    values (mapv, e_ab, n_a, n_b, 5);
+
+    insert into public.map_artifacts (map_version_id, building_id, kind, storage_path, byte_size)
+    values (mapv, bldg, 'worldmap', bldg || '/' || mapv || '/w.arexperience', 10);
+
+    update public.buildings set active_map_version_id = mapv where id = bldg;
+
+    -- Needs the active map version to exist first: the live-state trigger
+    -- rejects any element that is not part of it.
+    insert into public.live_edge_states (building_id, edge_stable_id, status)
+    values (bldg, e_ab, 'blocked');
+end $$;
+
+do $$
+declare
+    bldg    uuid := '99999999-9999-9999-9999-999999999999';
     blocked boolean := false;
     n integer;
 begin
@@ -799,7 +842,7 @@ reset role;
 
 do $$
 declare
-    bldg    uuid := '33333333-3333-3333-3333-333333333333';
+    bldg    uuid := '99999999-9999-9999-9999-999999999999';
     blocked boolean := false;
 begin
     perform pg_temp.act_as('outsider@egress.test');
@@ -811,12 +854,10 @@ begin
 end $$;
 reset role;
 
--- Done last: this actually removes the seeded building, so nothing after it
--- may depend on that row existing.
 do $$
 declare
-    bldg uuid := '33333333-3333-3333-3333-333333333333';
-    mapv uuid := '44444444-4444-4444-4444-444444444444';
+    bldg uuid := '99999999-9999-9999-9999-999999999999';
+    mapv uuid := '99999999-9999-9999-9999-999999999998';
     n integer;
 begin
     perform pg_temp.act_as('admin@egress.test');
@@ -837,5 +878,31 @@ begin
     perform pg_temp.assert(n = 0, 'deleting a building removes its live state');
 end $$;
 reset role;
+
+-- MARK: Leave the database as we found it ---------------------------------
+--
+-- 'Test Hall' is created by the buildings-workflow checks above and would
+-- otherwise accumulate in the organization catalogue on every run.
+
+do $$
+declare
+    seeded uuid := '33333333-3333-3333-3333-333333333333';
+    stray  uuid;
+    n integer;
+begin
+    for stray in
+        select id from public.buildings where name in ('Test Hall', 'Disposable Delete Fixture')
+    loop
+        delete from public.buildings where id = stray;
+    end loop;
+
+    select count(*) into n from public.buildings where id = seeded;
+    perform pg_temp.assert(n = 1, 'verification leaves the seeded building intact');
+
+    select count(*) into n from public.route_nodes n2
+    join public.map_versions mv on mv.id = n2.map_version_id
+    where mv.building_id = seeded;
+    perform pg_temp.assert(n = 7, 'verification leaves the seeded graph intact');
+end $$;
 
 \echo 'All security checks passed.'

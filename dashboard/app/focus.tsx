@@ -38,6 +38,17 @@ export function BuildingFocusView({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MLMap | null>(null);
+  // Set once, on the style's first `styledata`. Deliberately not
+  // isStyleLoaded(): that flickers false whenever any source is loading,
+  // including the geojson sources this component adds, so polling it made
+  // readiness nondeterministic.
+  const styleReadyRef = useRef(false);
+  // How many base-style (non-egress) layers were present at the last apply.
+  // styledata can fire first on an interim style with no layers at all; the
+  // mute pass then has nothing to paint. Re-applying whenever this count
+  // changes converges on the real style without ever looping on our own
+  // paint edits, which never change the layer count.
+  const baseLayerCountRef = useRef(-1);
   const [activeFloor, setActiveFloor] = useState<string>("all");
   const [shell, setShell] = useState<Shell | null>(
     building.footprint_geojson
@@ -82,9 +93,13 @@ export function BuildingFocusView({
    */
   const applyOverlays = useCallback(
     (map: MLMap) => {
-      // MARK: Mute the base style in place.
+      // MARK: Mute the base style in place. Our own layers carry the `egress-`
+      // prefix and are skipped: the mute pass runs again on every data change,
+      // and without this it would darken the overlay into the background it is
+      // meant to stand out from.
       for (const layer of map.getStyle().layers ?? []) {
         const id = layer.id;
+        if (id.startsWith("egress-")) continue;
         try {
           if (layer.type === "background") {
             map.setPaintProperty(id, "background-color", "#0d0e11");
@@ -101,8 +116,9 @@ export function BuildingFocusView({
             map.setPaintProperty(id, "fill-extrusion-color", "#1c2028");
             map.setPaintProperty(id, "fill-extrusion-opacity", 0.4);
           }
-        } catch {
-          // Layer does not support that paint property — leave it as styled.
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(`[focus] mute failed on layer "${id}"`, err);
         }
       }
 
@@ -113,28 +129,28 @@ export function BuildingFocusView({
       // MARK: Building shell.
       if (shell) {
         const shellData = { type: "Feature" as const, properties: {}, geometry: shell.geojson };
-        const existing = map.getSource("shell");
+        const existing = map.getSource("egress-shell");
         if (existing) {
           (existing as maplibregl.GeoJSONSource).setData(shellData);
-          map.setPaintProperty("shell", "fill-extrusion-height", shell.height);
+          map.setPaintProperty("egress-shell", "fill-extrusion-height", shell.height);
         } else {
-          map.addSource("shell", { type: "geojson", data: shellData });
+          map.addSource("egress-shell", { type: "geojson", data: shellData });
           map.addLayer({
-            id: "shell",
+            id: "egress-shell",
             type: "fill-extrusion",
-            source: "shell",
+            source: "egress-shell",
             paint: {
-              "fill-extrusion-color": "#7dd3fc",
+              "fill-extrusion-color": "#38bdf8",
               "fill-extrusion-height": shell.height,
               "fill-extrusion-base": 0,
-              "fill-extrusion-opacity": 0.15,
+              "fill-extrusion-opacity": 0.25,
             },
           });
           map.addLayer({
-            id: "shell-outline",
+            id: "egress-shell-outline",
             type: "line",
-            source: "shell",
-            paint: { "line-color": "#7dd3fc", "line-width": 2, "line-opacity": 0.9 },
+            source: "egress-shell",
+            paint: { "line-color": "#7dd3fc", "line-width": 3, "line-opacity": 1 },
           });
         }
       }
@@ -151,18 +167,20 @@ export function BuildingFocusView({
         })
         .filter((f): f is NonNullable<typeof f> => f !== null);
 
-      upsert(map, "slabs", featureCollection(slabs), {
-        id: "slabs",
+      upsert(map, "egress-slabs", featureCollection(slabs), {
+        id: "egress-slabs",
         type: "fill-extrusion",
-        source: "slabs",
+        source: "egress-slabs",
         paint: {
-          "fill-extrusion-color": "#94a3b8",
+          "fill-extrusion-color": "#e2e8f0",
           "fill-extrusion-height": ["get", "top"],
           "fill-extrusion-base": ["get", "base"],
-          "fill-extrusion-opacity": opacityExpr(0.35),
+          "fill-extrusion-opacity": opacityExpr(0.6),
         },
       });
-      if (map.getLayer("slabs")) map.setPaintProperty("slabs", "fill-extrusion-opacity", opacityExpr(0.35));
+      if (map.getLayer("egress-slabs")) {
+        map.setPaintProperty("egress-slabs", "fill-extrusion-opacity", opacityExpr(0.6));
+      }
 
       // MARK: Rooms — synthetic square footprints (the schema stores points).
       const rooms = nodes
@@ -180,18 +198,20 @@ export function BuildingFocusView({
           return turfPolygon([r], { floorIdx: floorIndex(n.floor_id), base, top: base + FLOOR_HEIGHT_M });
         });
 
-      upsert(map, "rooms", featureCollection(rooms), {
-        id: "rooms",
+      upsert(map, "egress-rooms", featureCollection(rooms), {
+        id: "egress-rooms",
         type: "fill-extrusion",
-        source: "rooms",
+        source: "egress-rooms",
         paint: {
-          "fill-extrusion-color": "#3f8cff",
+          "fill-extrusion-color": "#60a5fa",
           "fill-extrusion-height": ["get", "top"],
           "fill-extrusion-base": ["get", "base"],
-          "fill-extrusion-opacity": opacityExpr(0.55),
+          "fill-extrusion-opacity": opacityExpr(0.85),
         },
       });
-      if (map.getLayer("rooms")) map.setPaintProperty("rooms", "fill-extrusion-opacity", opacityExpr(0.55));
+      if (map.getLayer("egress-rooms")) {
+        map.setPaintProperty("egress-rooms", "fill-extrusion-opacity", opacityExpr(0.85));
+      }
 
       // MARK: Escape routes. Line layers have no altitude, so each segment is
       // buffered into a polygon and extruded as a ribbon at floor height.
@@ -216,18 +236,20 @@ export function BuildingFocusView({
         })
         .filter((f): f is NonNullable<typeof f> => f !== null);
 
-      upsert(map, "routes", featureCollection(ribbons), {
-        id: "routes",
+      upsert(map, "egress-routes", featureCollection(ribbons), {
+        id: "egress-routes",
         type: "fill-extrusion",
-        source: "routes",
+        source: "egress-routes",
         paint: {
-          "fill-extrusion-color": ["case", ["get", "stepFree"], "#22c55e", "#ef4444"],
+          "fill-extrusion-color": ["case", ["get", "stepFree"], "#22ff88", "#ff4d4d"],
           "fill-extrusion-height": ["get", "top"],
           "fill-extrusion-base": ["get", "base"],
-          "fill-extrusion-opacity": opacityExpr(0.95),
+          "fill-extrusion-opacity": opacityExpr(1),
         },
       });
-      if (map.getLayer("routes")) map.setPaintProperty("routes", "fill-extrusion-opacity", opacityExpr(0.95));
+      if (map.getLayer("egress-routes")) {
+        map.setPaintProperty("egress-routes", "fill-extrusion-opacity", opacityExpr(1));
+      }
 
       // MARK: Exits and waypoints.
       const labels = nodes
@@ -240,11 +262,14 @@ export function BuildingFocusView({
           }),
         );
 
-      upsert(map, "labels", featureCollection(labels), {
-        id: "labels",
+      upsert(map, "egress-labels", featureCollection(labels), {
+        id: "egress-labels",
         type: "symbol",
-        source: "labels",
+        source: "egress-labels",
         layout: {
+          // A font Liberty actually serves; the MapLibre default fontstack
+          // 404s on OpenFreeMap's glyph endpoint and floods the console.
+          "text-font": ["Noto Sans Regular"],
           "text-field": ["case", ["get", "isExit"], ["concat", "▲ ", ["get", "name"]], ["get", "name"]],
           "text-size": ["case", ["get", "isExit"], 13, 11],
           "text-offset": [0, -0.8],
@@ -257,15 +282,35 @@ export function BuildingFocusView({
           "text-opacity": opacityExpr(1),
         },
       });
-      if (map.getLayer("labels")) map.setPaintProperty("labels", "text-opacity", opacityExpr(1));
+      if (map.getLayer("egress-labels")) {
+        map.setPaintProperty("egress-labels", "text-opacity", opacityExpr(1));
+      }
 
+      const all = map.getStyle().layers ?? [];
+      const ours = all.filter((l) => l.id.startsWith("egress-")).map((l) => l.id);
+      baseLayerCountRef.current = all.length - ours.length;
+
+      // Paint edits update the style but a frame is not always scheduled for
+      // them (observed: muted values in the style, stale colours on screen
+      // until the next tile arrival forced a render). One explicit frame
+      // makes the apply visible immediately; the delayed second kick covers
+      // applies that land while the tab's animation frames are throttled.
+      map.triggerRepaint();
+      setTimeout(() => map.triggerRepaint(), 300);
       // eslint-disable-next-line no-console
       console.log(
-        `[focus] styleLoaded=${map.isStyleLoaded()} layers=${(map.getStyle().layers ?? []).length} shell=${shell?.source ?? "none"}`,
+        `[focus] applied base=${baseLayerCountRef.current} ours=${ours.length} shell=${shell?.source ?? "none"}`,
       );
     },
     [shell, nodes, edges, allFloors, activeFloor, toLngLat, floorIndex],
   );
+
+  // The creation effect must not depend on applyOverlays (that would tear the
+  // map down on every data change), so it reaches the latest one through a ref.
+  const applyOverlaysRef = useRef(applyOverlays);
+  useEffect(() => {
+    applyOverlaysRef.current = applyOverlays;
+  }, [applyOverlays]);
 
   // MARK: Map creation — exactly once, StrictMode-safe.
   useEffect(() => {
@@ -289,10 +334,30 @@ export function BuildingFocusView({
       attributionControl: { compact: true },
     });
     mapRef.current = map;
+    if (process.env.NODE_ENV === "development") {
+      // Debug handle only; never referenced by application code.
+      (window as unknown as Record<string, unknown>).__egressMap = map;
+    }
     map.dragRotate.enable();
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
 
-    map.once("load", () => map.resize());
+    // Attached synchronously at construction, so the event cannot be missed.
+    // `styledata` rather than `load`: adding layers and setting paint only
+    // needs the parsed style, while `load` additionally waits for every
+    // initial tile — and a single stalled tile request postpones it
+    // indefinitely (observed >2min in constrained environments), leaving the
+    // overlay invisible on an otherwise fine map. The listener stays attached
+    // because the first firing can precede the fetched style (an interim
+    // style with zero layers); the base-layer-count guard makes re-applies
+    // converge instead of looping.
+    const onStyleData = () => {
+      const baseCount = (map.getStyle().layers ?? []).filter((l) => !l.id.startsWith("egress-")).length;
+      if (baseCount === baseLayerCountRef.current) return;
+      map.resize();
+      styleReadyRef.current = true;
+      applyOverlaysRef.current(map);
+    };
+    map.on("styledata", onStyleData);
 
     // The container is laid out by a responsive grid, so its size can settle
     // after the map is constructed.
@@ -301,8 +366,11 @@ export function BuildingFocusView({
 
     return () => {
       ro.disconnect();
+      map.off("styledata", onStyleData);
       mapRef.current?.remove();
       mapRef.current = null;
+      styleReadyRef.current = false;
+      baseLayerCountRef.current = -1;
     };
   }, [anchorLat, anchorLng]);
 
@@ -311,25 +379,10 @@ export function BuildingFocusView({
   // (async footprint resolving late), or may not be (first mount).
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
-    // `load` fires exactly once and is easy to miss (a late-resolving footprint
-    // re-runs this effect long after it fired). `styledata` fires whenever the
-    // style is (re)parsed and keeps firing, so combined with an isStyleLoaded
-    // check it is safe both before and after the style is ready.
-    const run = () => {
-      if (!map.isStyleLoaded()) return;
-      applyOverlays(map);
-    };
-    run();
-    map.on("styledata", run);
-    // `idle` fires once the style is loaded AND all pending tiles are rendered.
-    // styledata alone can pass its isStyleLoaded check at a moment when paint
-    // operations are still dropped, so this is the one that reliably sticks.
-    map.on("idle", run);
-    return () => {
-      map.off("styledata", run);
-      map.off("idle", run);
-    };
+    // Data that arrives after the style is ready is drawn immediately; data
+    // that arrives before it is picked up by the `load` handler above, which
+    // reads the latest applyOverlays through its ref. No polling either way.
+    if (map && styleReadyRef.current) applyOverlays(map);
   }, [applyOverlays]);
 
   // MARK: Footprint — cached column first, then Overpass, then our own hull.
