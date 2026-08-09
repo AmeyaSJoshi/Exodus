@@ -87,9 +87,14 @@ struct RouteNode: Identifiable, Codable, Hashable {
     var type: RouteNodeType
     var position: CodableTransform
     var zoneID: UUID
-    /// Which floor the node sits on. Optional so zones saved before multi-floor
-    /// existed still decode; nil reads as the building's single default floor.
-    var floorID: String?
+    /// Which floor the node sits on. Always present: zones saved before
+    /// multi-floor existed are filled in at the decode boundary below, so no
+    /// read site has to second-guess it.
+    var floorID: String
+
+    /// The floor a node belongs to when nothing said otherwise — a
+    /// single-floor building, or a zone mapped before floors existed.
+    static let defaultFloorID = "default"
 
     init(
         id: UUID = UUID(),
@@ -97,7 +102,7 @@ struct RouteNode: Identifiable, Codable, Hashable {
         type: RouteNodeType,
         position: CodableTransform,
         zoneID: UUID,
-        floorID: String? = nil
+        floorID: String = RouteNode.defaultFloorID
     ) {
         self.id = id
         self.name = name
@@ -105,6 +110,19 @@ struct RouteNode: Identifiable, Codable, Hashable {
         self.position = position
         self.zoneID = zoneID
         self.floorID = floorID
+    }
+
+    /// The one place legacy data is repaired: a zone written before `floorID`
+    /// existed decodes as the default floor rather than forcing every consumer
+    /// to handle an absent value.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        type = try c.decode(RouteNodeType.self, forKey: .type)
+        position = try c.decode(CodableTransform.self, forKey: .position)
+        zoneID = try c.decode(UUID.self, forKey: .zoneID)
+        floorID = try c.decodeIfPresent(String.self, forKey: .floorID) ?? RouteNode.defaultFloorID
     }
 
     var worldPosition: SIMD3<Float> { position.position }

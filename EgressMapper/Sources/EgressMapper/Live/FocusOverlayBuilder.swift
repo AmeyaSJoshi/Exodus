@@ -12,20 +12,15 @@ enum FocusOverlayBuilder {
     static let slabThicknessM: Double = 0.15
     static let roomHalfWidthM: Double = 1.2
     static let routeBufferM: Double = 0.35
-    /// Nodes with no floor recorded (zones mapped before multi-floor) all sit
-    /// on one implicit ground floor.
-    static let defaultFloorID = "default"
-
     /// Every distinct floor in the graph, ordered. Matches the dashboard, which
     /// derives floor order by sorting the `floor_id` labels rather than reading
     /// `floors.level` — that column is never populated by the seed data.
     static func floors(in graph: BuildingGraph) -> [String] {
-        Array(Set(graph.nodes.map { $0.floorID ?? defaultFloorID })).sorted()
+        Array(Set(graph.nodes.map(\.floorID))).sorted()
     }
 
-    static func floorIndex(_ floorID: String?, in floors: [String]) -> Int {
-        let id = floorID ?? defaultFloorID
-        return max(0, floors.firstIndex(of: id) ?? 0)
+    static func floorIndex(_ floorID: String, in floors: [String]) -> Int {
+        max(0, floors.firstIndex(of: floorID) ?? 0)
     }
 
     // MARK: - Feature collections
@@ -34,7 +29,7 @@ enum FocusOverlayBuilder {
     /// stacked floors read as distinct planes.
     static func slabs(graph: BuildingGraph, anchor: BuildingAnchor, floors: [String]) -> [[String: Any]] {
         floors.compactMap { floorID -> [String: Any]? in
-            let onFloor = graph.nodes.filter { ($0.floorID ?? defaultFloorID) == floorID }
+            let onFloor = graph.nodes.filter { $0.floorID == floorID }
             guard onFloor.count >= 3 else { return nil }
             let points = onFloor.map { coordinate($0, anchor) }
             let hull = convexHull(points)
