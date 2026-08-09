@@ -163,7 +163,21 @@ and correctly left device 2 alone.
   not been run on a device, because AR navigation needs a saved `ARWorldMap`,
   which the seeded demo building does not have. To try it: map a zone, publish it
   (below), then start AR navigation and block a segment from the dashboard.
-- **Map publish from the phone.** Implemented (Saved Maps -> a zone ->
-  **Publish Building Map**): validates the graph, creates a draft, uploads nodes
-  and edges preserving their UUIDs, then calls `publish_map_version`. Not yet
-  exercised end to end.
+(Map publish is now verified — see below.)
+
+## Publish from the phone (verified)
+
+Saved Maps -> a zone -> **Publish Building Map** -> sign in as
+`admin@egress.test` -> paste the organization UUID
+(`11111111-1111-1111-1111-111111111111` in the seed) -> **Publish**.
+
+Verified on the Simulator against a zone stored in the app's own container:
+
+```
+Published: version 1, 7 nodes, 6 edges, building F1622060-9500-4017-B3B6-EAA29151CAD1
+DB:        Wade Academic Center | v1 | published | 7 nodes | 6 edges
+UUIDs:     all 7 device waypoint ids identical to the published stable_ids
+```
+
+The published building then appears in the dashboard's building selector and in
+the app's Live Backend Demo building list.
