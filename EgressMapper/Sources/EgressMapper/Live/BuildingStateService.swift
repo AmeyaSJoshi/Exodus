@@ -67,6 +67,12 @@ struct RemoteBuilding: Codable, Hashable, Identifiable {
     var scale: Double?
     var formattedAddress: String?
 
+    // OSM building footprint, cached into the row by the dashboard (migration
+    // 20260806001000). The phone never calls Overpass itself — it reads what
+    // the console already resolved.
+    var footprintGeoJSON: FootprintPolygon?
+    var footprintHeightM: Double?
+
     enum CodingKeys: String, CodingKey {
         case id, name, address, scale
         case activeMapVersionID = "active_map_version_id"
@@ -75,6 +81,8 @@ struct RemoteBuilding: Codable, Hashable, Identifiable {
         case anchorAltM = "anchor_alt_m"
         case headingDeg = "heading_deg"
         case formattedAddress = "formatted_address"
+        case footprintGeoJSON = "footprint_geojson"
+        case footprintHeightM = "footprint_height_m"
     }
 
     /// The anchor is only usable when both coordinates are present.
@@ -87,6 +95,24 @@ struct RemoteBuilding: Codable, Hashable, Identifiable {
             headingDeg: headingDeg ?? 0,
             scale: (scale ?? 1) > 0 ? (scale ?? 1) : 1
         )
+    }
+}
+
+/// A GeoJSON Polygon as stored in `buildings.footprint_geojson`. Only the
+/// outer ring is used; the dashboard's Overpass proxy never emits holes.
+struct FootprintPolygon: Codable, Hashable {
+    var type: String
+    var coordinates: [[[Double]]]
+
+    /// Serialised as a GeoJSON Feature, which is what MapLibre's shape parser
+    /// expects — a bare geometry is not accepted by `MLNShape(data:encoding:)`.
+    func featureData() throws -> Data {
+        let feature: [String: Any] = [
+            "type": "Feature",
+            "properties": [:],
+            "geometry": ["type": type, "coordinates": coordinates],
+        ]
+        return try JSONSerialization.data(withJSONObject: feature)
     }
 }
 

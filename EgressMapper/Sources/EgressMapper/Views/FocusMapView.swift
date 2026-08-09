@@ -13,8 +13,12 @@ struct FocusMapView: View {
     var body: some View {
         Group {
             if let anchor = building.anchor {
-                FocusMapRepresentable(anchor: anchor)
-                    .ignoresSafeArea(edges: .bottom)
+                FocusMapRepresentable(
+                    anchor: anchor,
+                    footprint: building.footprintGeoJSON,
+                    footprintHeightM: building.footprintHeightM
+                )
+                .ignoresSafeArea(edges: .bottom)
             } else {
                 ContentUnavailableView(
                     "No location set",
@@ -32,6 +36,14 @@ struct FocusMapView: View {
 
 private struct FocusMapRepresentable: UIViewRepresentable {
     let anchor: BuildingAnchor
+    let footprint: FootprintPolygon?
+    let footprintHeightM: Double?
+
+    /// Every source and layer this view adds carries this prefix. The mute
+    /// pass skips it — without that guard the pass repaints the overlay into
+    /// the background it is meant to stand out from, which is exactly the bug
+    /// the web version shipped.
+    static let overlayPrefix = "egress-"
 
     /// Matches the dashboard: OpenFreeMap's Liberty style, no key required.
     private static let styleURL = URL(string: "https://tiles.openfreemap.org/styles/liberty")!
@@ -69,6 +81,14 @@ private struct FocusMapRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ mapView: MLNMapView, context: Context) {
+        // The footprint can arrive after the style has already loaded, in
+        // which case didFinishLoading has been and gone — apply it here too.
+        if context.coordinator.footprint != footprint || context.coordinator.footprintHeightM != footprintHeightM {
+            context.coordinator.footprint = footprint
+            context.coordinator.footprintHeightM = footprintHeightM
+            if let style = mapView.style { context.coordinator.applyShell(to: style) }
+        }
+
         // Re-centre only when the anchor itself changed; leaving the camera
         // alone otherwise means a user's pan/tilt is not yanked back on every
         // SwiftUI update.
@@ -86,14 +106,18 @@ private struct FocusMapRepresentable: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(anchor: anchor)
+        Coordinator(anchor: anchor, footprint: footprint, footprintHeightM: footprintHeightM)
     }
 
     final class Coordinator: NSObject, MLNMapViewDelegate {
         var appliedAnchor: BuildingAnchor
+        var footprint: FootprintPolygon?
+        var footprintHeightM: Double?
 
-        init(anchor: BuildingAnchor) {
+        init(anchor: BuildingAnchor, footprint: FootprintPolygon?, footprintHeightM: Double?) {
             self.appliedAnchor = anchor
+            self.footprint = footprint
+            self.footprintHeightM = footprintHeightM
         }
 
         func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
@@ -101,6 +125,7 @@ private struct FocusMapRepresentable: UIViewRepresentable {
             // context, exactly as the dashboard does. Editing the loaded style
             // rather than shipping a second style keeps one source of truth.
             for layer in style.layers {
+                if layer.identifier.hasPrefix(FocusMapRepresentable.overlayPrefix) { continue }
                 switch layer {
                 case let fill as MLNFillStyleLayer:
                     fill.fillColor = NSExpression(forConstantValue: UIColor(red: 0.10, green: 0.11, blue: 0.13, alpha: 1))
@@ -120,6 +145,50 @@ private struct FocusMapRepresentable: UIViewRepresentable {
                     continue
                 }
             }
+
+            applyShell(to: style)
+        }
+
+        /// Idempotent: updates the existing source when the footprint changes
+        /// rather than adding a second one.
+        func applyShell(to style: MLNStyle) {
+            let sourceID = FocusMapRepresentable.overlayPrefix + "shell"
+            let fillID = FocusMapRepresentable.overlayPrefix + "shell-fill"
+            let outlineID = FocusMapRepresentable.overlayPrefix + "shell-outline"
+
+            guard let footprint else { return }
+            let height = footprintHeightM ?? 3
+
+            let shape: MLNShape
+            do {
+                shape = try MLNShape(data: footprint.featureData(), encoding: String.Encoding.utf8.rawValue)
+            } catch {
+                return
+            }
+
+            if let existing = style.source(withIdentifier: sourceID) as? MLNShapeSource {
+                existing.shape = shape
+                if let fill = style.layer(withIdentifier: fillID) as? MLNFillExtrusionStyleLayer {
+                    fill.fillExtrusionHeight = NSExpression(forConstantValue: height)
+                }
+                return
+            }
+
+            let source = MLNShapeSource(identifier: sourceID, shape: shape, options: nil)
+            style.addSource(source)
+
+            let fill = MLNFillExtrusionStyleLayer(identifier: fillID, source: source)
+            fill.fillExtrusionColor = NSExpression(forConstantValue: UIColor(red: 0.22, green: 0.74, blue: 0.99, alpha: 1))
+            fill.fillExtrusionHeight = NSExpression(forConstantValue: height)
+            fill.fillExtrusionBase = NSExpression(forConstantValue: 0)
+            fill.fillExtrusionOpacity = NSExpression(forConstantValue: 0.25)
+            style.addLayer(fill)
+
+            let outline = MLNLineStyleLayer(identifier: outlineID, source: source)
+            outline.lineColor = NSExpression(forConstantValue: UIColor(red: 0.49, green: 0.83, blue: 0.99, alpha: 1))
+            outline.lineWidth = NSExpression(forConstantValue: 3)
+            outline.lineOpacity = NSExpression(forConstantValue: 1)
+            style.addLayer(outline)
         }
     }
 }
