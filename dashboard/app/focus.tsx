@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import type { Map as MLMap } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -19,6 +19,7 @@ const BOUNDS_HALF_M = 200;
 const GHOST_OPACITY = 0.1;
 
 type LngLat = [number, number];
+type Shell = { geojson: GeoJSONPolygon; height: number; source: "osm" | "hull" };
 
 export function BuildingFocusView({
   building,
@@ -37,111 +38,51 @@ export function BuildingFocusView({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MLMap | null>(null);
-  const [loaded, setLoaded] = useState(false);
   const [activeFloor, setActiveFloor] = useState<string>("all");
-  const [shell, setShell] = useState<{ geojson: GeoJSONPolygon; height: number; source: "osm" | "hull" } | null>(
+  const [shell, setShell] = useState<Shell | null>(
     building.footprint_geojson
-      ? { geojson: building.footprint_geojson, height: building.footprint_height_m ?? allFloors.length * FLOOR_HEIGHT_M, source: "osm" }
+      ? {
+          geojson: building.footprint_geojson,
+          height: building.footprint_height_m ?? allFloors.length * FLOOR_HEIGHT_M,
+          source: "osm",
+        }
       : null,
   );
 
-  const anchor =
-    building.anchor_lat != null && building.anchor_lng != null
-      ? { anchor_lat: building.anchor_lat, anchor_lng: building.anchor_lng }
-      : null;
+  const anchorLat = building.anchor_lat;
+  const anchorLng = building.anchor_lng;
+  const hasAnchor = anchorLat != null && anchorLng != null;
   const heading = building.heading_deg ?? 0;
   const scale = building.scale || 1;
 
-  const toLngLat = useMemo(() => {
-    return (x: number, z: number): LngLat => {
-      if (!anchor) return [0, 0];
-      const { lat, lng } = localToLatLng(x * scale, z * scale, anchor, heading);
+  const toLngLat = useCallback(
+    (x: number, z: number): LngLat => {
+      if (anchorLat == null || anchorLng == null) return [0, 0];
+      const { lat, lng } = localToLatLng(x * scale, z * scale, { anchor_lat: anchorLat, anchor_lng: anchorLng }, heading);
       return [lng, lat];
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [anchor?.anchor_lat, anchor?.anchor_lng, heading, scale]);
+    },
+    [anchorLat, anchorLng, heading, scale],
+  );
 
-  const floorIndex = useMemo(() => {
-    return (floorId: string) => {
+  const floorIndex = useCallback(
+    (floorId: string) => {
       const i = allFloors.indexOf(floorId);
       return i < 0 ? 0 : i;
-    };
-  }, [allFloors]);
+    },
+    [allFloors],
+  );
 
-  // MARK: Footprint — cached column first, then Overpass, then our own hull.
-  useEffect(() => {
-    if (!anchor || shell) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetch("/api/building-footprint", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ lat: anchor.anchor_lat, lng: anchor.anchor_lng, floorCount: allFloors.length }),
-        });
-        if (cancelled) return;
-        if (res.ok) {
-          const data = await res.json();
-          setShell({ geojson: data.geojson, height: data.height_m, source: "osm" });
-          if (canEdit) {
-            const patch = { footprint_geojson: data.geojson, footprint_height_m: data.height_m };
-            await supabase.from("buildings").update(patch).eq("id", building.id);
-            if (!cancelled) onFootprintCached?.(patch);
-          }
-          return;
-        }
-      } catch {
-        // fall through to the hull fallback
-      }
-      if (cancelled || !nodes.length) return;
-      const pts = featureCollection(nodes.map((n) => point(toLngLat(n.position.x, n.position.z))));
-      const hull = convex(pts);
-      if (!hull) return;
-      const padded = buffer(hull, 2, { units: "meters" });
-      if (padded) {
-        setShell({
-          geojson: padded.geometry as GeoJSONPolygon,
-          height: Math.max(1, allFloors.length) * FLOOR_HEIGHT_M,
-          source: "hull",
-        });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [anchor?.anchor_lat, anchor?.anchor_lng, building.id, allFloors.length, nodes.length, canEdit, shell]);
-
-  // MARK: Map bootstrap. Runs once per anchor — never on floor/overlay change.
-  useEffect(() => {
-    if (!containerRef.current || !anchor || mapRef.current) return;
-
-    const sw = localToLatLng(-BOUNDS_HALF_M, BOUNDS_HALF_M, anchor, 0);
-    const ne = localToLatLng(BOUNDS_HALF_M, -BOUNDS_HALF_M, anchor, 0);
-
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: STYLE_URL,
-      center: [anchor.anchor_lng, anchor.anchor_lat],
-      zoom: 18.5,
-      pitch: 60,
-      maxPitch: 85,
-      minZoom: 16,
-      maxBounds: [
-        [sw.lng, sw.lat],
-        [ne.lng, ne.lat],
-      ],
-      attributionControl: { compact: true },
-    });
-    mapRef.current = map;
-    map.dragRotate.enable();
-    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
-
-    map.on("load", () => {
-      // Mute the base style in place rather than shipping a second style:
-      // surroundings should read as faint context, not compete with the
-      // building. Layer ids differ between style versions, so each set is
-      // guarded — an unknown paint property must not abort the loop.
+  /**
+   * Everything the map draws, in one idempotent pass.
+   *
+   * Safe to call at any time and any number of times: the base style is muted
+   * in place with setPaintProperty (never setStyle, which would destroy every
+   * custom layer added here), and each source is updated via setData when it
+   * already exists rather than re-added.
+   */
+  const applyOverlays = useCallback(
+    (map: MLMap) => {
+      // MARK: Mute the base style in place.
       for (const layer of map.getStyle().layers ?? []) {
         const id = layer.id;
         try {
@@ -164,78 +105,53 @@ export function BuildingFocusView({
           // Layer does not support that paint property — leave it as styled.
         }
       }
-      map.resize();
-      setLoaded(true);
-    });
 
-    // The container is laid out by a responsive grid, so its size can settle
-    // after the map is constructed; without this the canvas keeps the size it
-    // was born with and paints only part of the viewport.
-    const ro = new ResizeObserver(() => map.resize());
-    ro.observe(containerRef.current);
+      const activeIdx = activeFloor === "all" ? -1 : floorIndex(activeFloor);
+      const opacityExpr = (full: number): maplibregl.ExpressionSpecification | number =>
+        activeIdx < 0 ? full : ["case", ["==", ["get", "floorIdx"], activeIdx], full, GHOST_OPACITY];
 
-    return () => {
-      ro.disconnect();
-      map.remove();
-      mapRef.current = null;
-      setLoaded(false);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [anchor?.anchor_lat, anchor?.anchor_lng]);
+      // MARK: Building shell.
+      if (shell) {
+        const shellData = { type: "Feature" as const, properties: {}, geometry: shell.geojson };
+        const existing = map.getSource("shell");
+        if (existing) {
+          (existing as maplibregl.GeoJSONSource).setData(shellData);
+          map.setPaintProperty("shell", "fill-extrusion-height", shell.height);
+        } else {
+          map.addSource("shell", { type: "geojson", data: shellData });
+          map.addLayer({
+            id: "shell",
+            type: "fill-extrusion",
+            source: "shell",
+            paint: {
+              "fill-extrusion-color": "#7dd3fc",
+              "fill-extrusion-height": shell.height,
+              "fill-extrusion-base": 0,
+              "fill-extrusion-opacity": 0.15,
+            },
+          });
+          map.addLayer({
+            id: "shell-outline",
+            type: "line",
+            source: "shell",
+            paint: { "line-color": "#7dd3fc", "line-width": 2, "line-opacity": 0.9 },
+          });
+        }
+      }
 
-  // MARK: Overlay — shell, slabs, rooms, route ribbons, labels.
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !loaded || !anchor) return;
+      // MARK: Floor slabs — convex hull of each floor's nodes, thin extrusion.
+      const slabs = allFloors
+        .map((fid) => {
+          const onFloor = nodes.filter((n) => n.floor_id === fid);
+          if (onFloor.length < 3) return null;
+          const hull = convex(featureCollection(onFloor.map((n) => point(toLngLat(n.position.x, n.position.z)))));
+          if (!hull) return null;
+          const base = floorIndex(fid) * FLOOR_HEIGHT_M;
+          return { ...hull, properties: { floorIdx: floorIndex(fid), base, top: base + SLAB_THICKNESS_M } };
+        })
+        .filter((f): f is NonNullable<typeof f> => f !== null);
 
-    const ids = ["shell", "slabs", "rooms", "routes", "labels"];
-    for (const id of ids) {
-      if (map.getLayer(id)) map.removeLayer(id);
-      if (map.getLayer(`${id}-outline`)) map.removeLayer(`${id}-outline`);
-      if (map.getSource(id)) map.removeSource(id);
-    }
-
-    // Building shell.
-    if (shell) {
-      map.addSource("shell", { type: "geojson", data: { type: "Feature", properties: {}, geometry: shell.geojson } });
-      map.addLayer({
-        id: "shell",
-        type: "fill-extrusion",
-        source: "shell",
-        paint: {
-          "fill-extrusion-color": "#7dd3fc",
-          "fill-extrusion-height": shell.height,
-          "fill-extrusion-base": 0,
-          "fill-extrusion-opacity": 0.15,
-        },
-      });
-      map.addLayer({
-        id: "shell-outline",
-        type: "line",
-        source: "shell",
-        paint: { "line-color": "#7dd3fc", "line-width": 2, "line-opacity": 0.9 },
-      });
-    }
-
-    const activeIdx = activeFloor === "all" ? -1 : floorIndex(activeFloor);
-    const opacityExpr = (full: number): maplibregl.ExpressionSpecification | number =>
-      activeIdx < 0 ? full : ["case", ["==", ["get", "floorIdx"], activeIdx], full, GHOST_OPACITY];
-
-    // Floor slabs — convex hull of each floor's nodes, thin extrusion.
-    const slabs = allFloors
-      .map((fid) => {
-        const onFloor = nodes.filter((n) => n.floor_id === fid);
-        if (onFloor.length < 3) return null;
-        const hull = convex(featureCollection(onFloor.map((n) => point(toLngLat(n.position.x, n.position.z)))));
-        if (!hull) return null;
-        const base = floorIndex(fid) * FLOOR_HEIGHT_M;
-        return { ...hull, properties: { floorIdx: floorIndex(fid), base, top: base + SLAB_THICKNESS_M } };
-      })
-      .filter((f): f is NonNullable<typeof f> => f !== null);
-
-    if (slabs.length) {
-      map.addSource("slabs", { type: "geojson", data: featureCollection(slabs) });
-      map.addLayer({
+      upsert(map, "slabs", featureCollection(slabs), {
         id: "slabs",
         type: "fill-extrusion",
         source: "slabs",
@@ -246,27 +162,25 @@ export function BuildingFocusView({
           "fill-extrusion-opacity": opacityExpr(0.35),
         },
       });
-    }
+      if (map.getLayer("slabs")) map.setPaintProperty("slabs", "fill-extrusion-opacity", opacityExpr(0.35));
 
-    // Rooms — synthetic square footprints (the schema stores points, not walls).
-    const rooms = nodes
-      .filter((n) => n.type === "room")
-      .map((n) => {
-        const base = floorIndex(n.floor_id) * FLOOR_HEIGHT_M;
-        const c: [number, number][] = [
-          [n.position.x - ROOM_HALF_WIDTH_M, n.position.z - ROOM_HALF_WIDTH_M],
-          [n.position.x + ROOM_HALF_WIDTH_M, n.position.z - ROOM_HALF_WIDTH_M],
-          [n.position.x + ROOM_HALF_WIDTH_M, n.position.z + ROOM_HALF_WIDTH_M],
-          [n.position.x - ROOM_HALF_WIDTH_M, n.position.z + ROOM_HALF_WIDTH_M],
-        ];
-        const r = c.map(([x, z]) => toLngLat(x, z));
-        r.push(r[0]);
-        return turfPolygon([r], { floorIdx: floorIndex(n.floor_id), base, top: base + FLOOR_HEIGHT_M });
-      });
+      // MARK: Rooms — synthetic square footprints (the schema stores points).
+      const rooms = nodes
+        .filter((n) => n.type === "room")
+        .map((n) => {
+          const base = floorIndex(n.floor_id) * FLOOR_HEIGHT_M;
+          const c: [number, number][] = [
+            [n.position.x - ROOM_HALF_WIDTH_M, n.position.z - ROOM_HALF_WIDTH_M],
+            [n.position.x + ROOM_HALF_WIDTH_M, n.position.z - ROOM_HALF_WIDTH_M],
+            [n.position.x + ROOM_HALF_WIDTH_M, n.position.z + ROOM_HALF_WIDTH_M],
+            [n.position.x - ROOM_HALF_WIDTH_M, n.position.z + ROOM_HALF_WIDTH_M],
+          ];
+          const r = c.map(([x, z]) => toLngLat(x, z));
+          r.push(r[0]);
+          return turfPolygon([r], { floorIdx: floorIndex(n.floor_id), base, top: base + FLOOR_HEIGHT_M });
+        });
 
-    if (rooms.length) {
-      map.addSource("rooms", { type: "geojson", data: featureCollection(rooms) });
-      map.addLayer({
+      upsert(map, "rooms", featureCollection(rooms), {
         id: "rooms",
         type: "fill-extrusion",
         source: "rooms",
@@ -277,36 +191,32 @@ export function BuildingFocusView({
           "fill-extrusion-opacity": opacityExpr(0.55),
         },
       });
-    }
+      if (map.getLayer("rooms")) map.setPaintProperty("rooms", "fill-extrusion-opacity", opacityExpr(0.55));
 
-    // Escape routes. MapLibre line layers have no altitude, so each segment is
-    // buffered into a polygon and extruded as a thin ribbon at floor height.
-    const ribbons = edges
-      .map((e) => {
-        const a = nodes.find((n) => n.stable_id === e.from_node_stable_id);
-        const b = nodes.find((n) => n.stable_id === e.to_node_stable_id);
-        if (!a || !b) return null;
-        const line = lineString([toLngLat(a.position.x, a.position.z), toLngLat(b.position.x, b.position.z)]);
-        const ribbon = buffer(line, ROUTE_BUFFER_M, { units: "meters" });
-        if (!ribbon) return null;
-        const base = floorIndex(a.floor_id) * FLOOR_HEIGHT_M;
-        return {
-          ...ribbon,
-          properties: {
-            floorIdx: floorIndex(a.floor_id),
-            base: base + 0.1,
-            top: base + 0.4,
-            // The graph distinguishes step-free from stairs/elevator-only, so
-            // that is the split the colour carries.
-            stepFree: e.wheelchair_accessible && !e.contains_stairs,
-          },
-        };
-      })
-      .filter((f): f is NonNullable<typeof f> => f !== null);
+      // MARK: Escape routes. Line layers have no altitude, so each segment is
+      // buffered into a polygon and extruded as a ribbon at floor height.
+      const ribbons = edges
+        .map((e) => {
+          const a = nodes.find((n) => n.stable_id === e.from_node_stable_id);
+          const b = nodes.find((n) => n.stable_id === e.to_node_stable_id);
+          if (!a || !b) return null;
+          const line = lineString([toLngLat(a.position.x, a.position.z), toLngLat(b.position.x, b.position.z)]);
+          const ribbon = buffer(line, ROUTE_BUFFER_M, { units: "meters" });
+          if (!ribbon) return null;
+          const base = floorIndex(a.floor_id) * FLOOR_HEIGHT_M;
+          return {
+            ...ribbon,
+            properties: {
+              floorIdx: floorIndex(a.floor_id),
+              base: base + 0.1,
+              top: base + 0.4,
+              stepFree: e.wheelchair_accessible && !e.contains_stairs,
+            },
+          };
+        })
+        .filter((f): f is NonNullable<typeof f> => f !== null);
 
-    if (ribbons.length) {
-      map.addSource("routes", { type: "geojson", data: featureCollection(ribbons) });
-      map.addLayer({
+      upsert(map, "routes", featureCollection(ribbons), {
         id: "routes",
         type: "fill-extrusion",
         source: "routes",
@@ -317,22 +227,20 @@ export function BuildingFocusView({
           "fill-extrusion-opacity": opacityExpr(0.95),
         },
       });
-    }
+      if (map.getLayer("routes")) map.setPaintProperty("routes", "fill-extrusion-opacity", opacityExpr(0.95));
 
-    // Exits and waypoints.
-    const labels = nodes
-      .filter((n) => n.type !== "hallwayPoint")
-      .map((n) =>
-        point(toLngLat(n.position.x, n.position.z), {
-          floorIdx: floorIndex(n.floor_id),
-          name: n.name,
-          isExit: n.type === "exit",
-        }),
-      );
+      // MARK: Exits and waypoints.
+      const labels = nodes
+        .filter((n) => n.type !== "hallwayPoint")
+        .map((n) =>
+          point(toLngLat(n.position.x, n.position.z), {
+            floorIdx: floorIndex(n.floor_id),
+            name: n.name,
+            isExit: n.type === "exit",
+          }),
+        );
 
-    if (labels.length) {
-      map.addSource("labels", { type: "geojson", data: featureCollection(labels) });
-      map.addLayer({
+      upsert(map, "labels", featureCollection(labels), {
         id: "labels",
         type: "symbol",
         source: "labels",
@@ -349,11 +257,125 @@ export function BuildingFocusView({
           "text-opacity": opacityExpr(1),
         },
       });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, shell, nodes, edges, allFloors, activeFloor, toLngLat, floorIndex]);
+      if (map.getLayer("labels")) map.setPaintProperty("labels", "text-opacity", opacityExpr(1));
 
-  if (!anchor) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[focus] styleLoaded=${map.isStyleLoaded()} layers=${(map.getStyle().layers ?? []).length} shell=${shell?.source ?? "none"}`,
+      );
+    },
+    [shell, nodes, edges, allFloors, activeFloor, toLngLat, floorIndex],
+  );
+
+  // MARK: Map creation — exactly once, StrictMode-safe.
+  useEffect(() => {
+    if (mapRef.current || !containerRef.current || anchorLat == null || anchorLng == null) return;
+
+    const sw = localToLatLng(-BOUNDS_HALF_M, BOUNDS_HALF_M, { anchor_lat: anchorLat, anchor_lng: anchorLng }, 0);
+    const ne = localToLatLng(BOUNDS_HALF_M, -BOUNDS_HALF_M, { anchor_lat: anchorLat, anchor_lng: anchorLng }, 0);
+
+    const map = new maplibregl.Map({
+      container: containerRef.current,
+      style: STYLE_URL,
+      center: [anchorLng, anchorLat],
+      zoom: 18.5,
+      pitch: 60,
+      maxPitch: 85,
+      minZoom: 16,
+      maxBounds: [
+        [sw.lng, sw.lat],
+        [ne.lng, ne.lat],
+      ],
+      attributionControl: { compact: true },
+    });
+    mapRef.current = map;
+    map.dragRotate.enable();
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
+
+    map.once("load", () => map.resize());
+
+    // The container is laid out by a responsive grid, so its size can settle
+    // after the map is constructed.
+    const ro = new ResizeObserver(() => map.resize());
+    ro.observe(containerRef.current);
+
+    return () => {
+      ro.disconnect();
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
+  }, [anchorLat, anchorLng]);
+
+  // MARK: Overlays — re-applied whenever the data or the active floor changes.
+  // Two-sided guard: the style may already be loaded by the time this runs
+  // (async footprint resolving late), or may not be (first mount).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    // `load` fires exactly once and is easy to miss (a late-resolving footprint
+    // re-runs this effect long after it fired). `styledata` fires whenever the
+    // style is (re)parsed and keeps firing, so combined with an isStyleLoaded
+    // check it is safe both before and after the style is ready.
+    const run = () => {
+      if (!map.isStyleLoaded()) return;
+      applyOverlays(map);
+    };
+    run();
+    map.on("styledata", run);
+    // `idle` fires once the style is loaded AND all pending tiles are rendered.
+    // styledata alone can pass its isStyleLoaded check at a moment when paint
+    // operations are still dropped, so this is the one that reliably sticks.
+    map.on("idle", run);
+    return () => {
+      map.off("styledata", run);
+      map.off("idle", run);
+    };
+  }, [applyOverlays]);
+
+  // MARK: Footprint — cached column first, then Overpass, then our own hull.
+  useEffect(() => {
+    if (anchorLat == null || anchorLng == null || shell) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/building-footprint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lat: anchorLat, lng: anchorLng, floorCount: allFloors.length }),
+        });
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          setShell({ geojson: data.geojson, height: data.height_m, source: "osm" });
+          if (canEdit) {
+            const patch = { footprint_geojson: data.geojson, footprint_height_m: data.height_m };
+            await supabase.from("buildings").update(patch).eq("id", building.id);
+            if (!cancelled) onFootprintCached?.(patch);
+          }
+          return;
+        }
+      } catch {
+        // fall through to the hull fallback
+      }
+      if (cancelled || !nodes.length) return;
+      const hull = convex(featureCollection(nodes.map((n) => point(toLngLat(n.position.x, n.position.z)))));
+      if (!hull) return;
+      const padded = buffer(hull, 2, { units: "meters" });
+      if (padded && !cancelled) {
+        setShell({
+          geojson: padded.geometry as GeoJSONPolygon,
+          height: Math.max(1, allFloors.length) * FLOOR_HEIGHT_M,
+          source: "hull",
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchorLat, anchorLng, building.id, allFloors.length, nodes.length, canEdit, shell]);
+
+  if (!hasAnchor) {
     return (
       <div className="flex h-[520px] items-center justify-center rounded-xl border border-hairline bg-surface p-8 text-center">
         <p className="max-w-sm text-sm text-ink-2">
@@ -400,4 +422,20 @@ export function BuildingFocusView({
       <div ref={containerRef} className="h-[520px] w-full" />
     </div>
   );
+}
+
+/** Add the source+layer on first call, update the data on every call after. */
+function upsert(
+  map: MLMap,
+  id: string,
+  data: GeoJSON.FeatureCollection,
+  layer: maplibregl.LayerSpecification,
+) {
+  const existing = map.getSource(id);
+  if (existing) {
+    (existing as maplibregl.GeoJSONSource).setData(data);
+    return;
+  }
+  map.addSource(id, { type: "geojson", data });
+  map.addLayer(layer);
 }
