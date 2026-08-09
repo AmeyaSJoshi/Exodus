@@ -118,8 +118,12 @@ begin
         (outsider_uid, org_b, 'admin',  'Outsider Admin'),
         (soham_uid,    org_a, 'admin',  'Soham')
     on conflict (id) do update
+        -- The handle_new_user trigger has already created these rows, keying
+        -- display_name off the email, so every column the insert supplies has
+        -- to be restated here or the seed's own value is silently discarded.
         set organization_id = excluded.organization_id,
-            role = excluded.role;
+            role = excluded.role,
+            display_name = excluded.display_name;
 
     insert into public.buildings (id, organization_id, name, address)
     values (bldg, org_a, 'Wade Academic Center', '960 W Hedding St, San Jose, CA')

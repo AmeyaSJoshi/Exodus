@@ -24,34 +24,12 @@ final class BackendSession {
     var isSignedIn: Bool { service.signedInEmail != nil }
     var canManage: Bool { profile.canManageBuildings }
 
-    /// A request that never came back. An unreachable host does not fail fast
-    /// on its own — the socket just sits there — so a sign-in against a stale
-    /// LAN address would spin forever with nothing on screen to explain it.
-    struct BackendTimeout: Error {}
-
-    /// Runs `operation`, or throws `BackendTimeout` if it outlasts `seconds`.
-    private func withTimeout(
-        _ seconds: Double,
-        _ operation: @escaping @MainActor () async throws -> Void
-    ) async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { @MainActor in try await operation() }
-            group.addTask {
-                try await Task.sleep(for: .seconds(seconds))
-                throw BackendTimeout()
-            }
-            // Whichever finishes first decides; the loser is cancelled.
-            try await group.next()
-            group.cancelAll()
-        }
-    }
-
     func signIn() async {
         busy = true; error = nil
         defer { busy = false }
         do {
             try service.configure(config)
-            try await withTimeout(15) {
+            try await withTimeout(seconds: 15) {
                 try await self.service.signIn(email: self.email, password: self.password)
                 try await self.service.loadProfile()
             }
@@ -59,7 +37,7 @@ final class BackendSession {
                 error = "Your account is not assigned to an organization. Ask an administrator to add you."
                 return
             }
-            try await withTimeout(15) {
+            try await withTimeout(seconds: 15) {
                 try await self.service.loadCatalog()
                 try await self.service.loadBuildings()
             }
