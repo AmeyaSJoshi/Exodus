@@ -188,6 +188,7 @@ struct HazardReportView: View {
         case .fire: return "flame.fill"
         case .unavailableStairwell: return "figure.stairs"
         case .unavailableElevator: return "arrow.up.arrow.down.square"
+        case .crowding: return "person.3.fill"
         case .other: return "exclamationmark.triangle.fill"
         }
     }

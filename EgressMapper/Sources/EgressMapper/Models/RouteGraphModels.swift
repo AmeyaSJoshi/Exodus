@@ -135,6 +135,7 @@ enum RouteHazardType: String, Codable, CaseIterable, Hashable {
     case fire
     case unavailableStairwell
     case unavailableElevator
+    case crowding
     case other
 
     var displayName: String {
@@ -145,17 +146,48 @@ enum RouteHazardType: String, Codable, CaseIterable, Hashable {
         case .fire: return "Fire ahead"
         case .unavailableStairwell: return "Stairwell unavailable"
         case .unavailableElevator: return "Elevator unavailable"
+        case .crowding: return "Crowding ahead"
         case .other: return "Other problem"
         }
     }
 
-    /// Whether this hazard makes the segment impassable outright.
-    var blocksTravel: Bool {
+    /// What routing may do with a segment carrying this hazard.
+    ///
+    /// Some conditions remove a segment outright; others make it expensive but
+    /// still usable when nothing better exists. This is the only place that
+    /// decision is made — `RouteEdge.availability` and the router both read it,
+    /// so the two can never disagree.
+    func availability(severity: Int) -> EdgeAvailability {
+        let clamped = Double(max(1, min(5, severity)))
         switch self {
         case .blockedHallway, .lockedDoor, .fire, .unavailableStairwell, .unavailableElevator:
-            return true
+            return .unavailable
         case .smoke, .other:
-            return false   // passable but heavily penalised
+            return .discouraged(costMultiplier: 1 + clamped * 0.6)
+        case .crowding:
+            // Crowding slows people down; it never makes a corridor impossible.
+            return .discouraged(costMultiplier: 1 + clamped * 0.35)
+        }
+    }
+
+    /// Whether this hazard makes the segment impassable outright.
+    var blocksTravel: Bool { availability(severity: 3) == .unavailable }
+}
+
+/// What the router may do with one segment right now.
+///
+/// `unavailable` removes the edge from the search space entirely; it is never
+/// expressed as a large finite cost that a desperate search could still pick.
+enum EdgeAvailability: Equatable {
+    case available
+    case discouraged(costMultiplier: Double)
+    case unavailable
+
+    var costMultiplier: Double {
+        switch self {
+        case .available: return 1
+        case .discouraged(let multiplier): return multiplier
+        case .unavailable: return .infinity
         }
     }
 }
@@ -192,6 +224,9 @@ struct RouteEdge: Identifiable, Codable, Hashable {
     var isBlocked: Bool
     var accessibility: EdgeAccessibility
     var hazard: RouteHazard?
+    /// Set only by the live overlay when an administrator publishes
+    /// `restricted`. Optional so maps saved before this existed still decode.
+    var restrictionSeverity: Int?
 
     init(
         id: UUID = UUID(),
@@ -201,7 +236,8 @@ struct RouteEdge: Identifiable, Codable, Hashable {
         isBidirectional: Bool = true,
         isBlocked: Bool = false,
         accessibility: EdgeAccessibility = .standard,
-        hazard: RouteHazard? = nil
+        hazard: RouteHazard? = nil,
+        restrictionSeverity: Int? = nil
     ) {
         self.id = id
         self.fromNodeID = fromNodeID
@@ -211,18 +247,39 @@ struct RouteEdge: Identifiable, Codable, Hashable {
         self.isBlocked = isBlocked
         self.accessibility = accessibility
         self.hazard = hazard
+        self.restrictionSeverity = restrictionSeverity
+    }
+
+    /// The one answer to "can the router use this, and at what cost".
+    ///
+    /// An administrator's *status* decides whether a segment is passable; the
+    /// hazard type only sizes the penalty. Publishing `restricted` therefore
+    /// never removes the segment, even when the hazard described would on its
+    /// own — turning a stated restriction into a hard block would be putting
+    /// words in the administrator's mouth.
+    var availability: EdgeAvailability {
+        if isBlocked { return .unavailable }
+        if let restrictionSeverity {
+            let described = (hazard?.type ?? .other).availability(severity: restrictionSeverity)
+            if case .discouraged(let multiplier) = described {
+                return .discouraged(costMultiplier: multiplier)
+            }
+            // A hazard that would normally close the segment, published only as
+            // a restriction: usable, but a genuine last resort.
+            return .discouraged(costMultiplier: 6 + Double(max(1, min(5, restrictionSeverity))) * 2)
+        }
+        guard let hazard else { return .available }
+        return hazard.type.availability(severity: hazard.severity)
     }
 
     /// True when travel is impossible — either explicitly blocked or carrying
     /// a hazard that prevents passage.
-    var isImpassable: Bool {
-        isBlocked || (hazard?.type.blocksTravel ?? false)
-    }
+    var isImpassable: Bool { availability == .unavailable }
 
     /// Multiplier applied for non-blocking hazards (e.g. light smoke).
     var hazardPenalty: Double {
-        guard let hazard, !hazard.type.blocksTravel else { return 1 }
-        return 1 + Double(hazard.severity) * 0.6
+        let multiplier = availability.costMultiplier
+        return multiplier.isFinite ? multiplier : 1
     }
 
     func other(than nodeID: UUID) -> UUID? {

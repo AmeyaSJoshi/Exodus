@@ -200,11 +200,19 @@ struct LiveStateOverlay: Equatable {
                     )
                 }
             } else if let severity = restricted[edge.id] {
+                // The administrator's hazard type is what decides whether a
+                // restricted segment is merely expensive or actually impassable.
+                // Forcing `.smoke` here silently reclassified every restriction.
+                let state = edgeStates[edge.id]
+                let type = state?.hazardType.flatMap(RouteHazardType.init(rawValue:)) ?? .other
                 updated.hazard = RouteHazard(
-                    type: .smoke,
-                    description: edgeStates[edge.id]?.reason ?? "Restricted",
+                    type: type,
+                    description: state?.reason ?? "Restricted",
                     severity: severity
                 )
+                // Marks it discouraged rather than impassable, whatever the
+                // hazard type would mean on its own.
+                updated.restrictionSeverity = severity
             }
             return updated
         }
