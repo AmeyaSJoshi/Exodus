@@ -38,6 +38,9 @@ enum EmergencyVoiceCommand: Equatable {
     case reportHazard(type: RouteHazardType, targetHint: String?)
     case updateAccessibility(NavigationProfileChange)
     case requestAlternativeExit
+    /// "the exit is open again", "it's clear now" — undoes this phone's own
+    /// hazard reports so a route that was ruled out becomes usable again.
+    case clearMyReports
     case unknown(transcript: String)
 
     /// Commands that change the graph must always be confirmed first.
@@ -60,6 +63,18 @@ enum VoiceCommandParser {
         // about the user, not a report that the stairs are blocked.
         if let change = accessibilityChange(in: t) {
             return .updateAccessibility(change)
+        }
+
+        // Checked before the hazard patterns: "the exit is open again" and
+        // "the hallway is clear now" both contain hazard words, and the
+        // clearing sense has to win.
+        if contains(t, [
+            "open again", "is open", "reopened", "re opened", "not blocked",
+            "no longer blocked", "clear now", "is clear", "all clear",
+            "unblock", "undo my report", "clear my report", "clear reports",
+            "cancel my report", "it's fine now", "its fine now",
+        ]) {
+            return .clearMyReports
         }
 
         if contains(t, ["another exit", "different exit", "other exit", "alternative exit", "somewhere else"]) {

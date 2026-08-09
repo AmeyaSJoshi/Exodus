@@ -89,6 +89,12 @@ struct GuidanceView: View {
             }
         }
         .alert("Navigation", isPresented: .constant(errorMessage != nil)) {
+            // A route ruled out by this phone's own hazard reports must be
+            // recoverable from here. Sending the user "Back" was the only
+            // option, which left them unable to undo their own report.
+            if hasOwnReports {
+                Button("Clear My Reports") { clearOwnReports() }
+            }
             Button("Back") { errorMessage = nil; stopAndExit() }
         } message: {
             Text(errorMessage ?? "")
@@ -126,7 +132,9 @@ struct GuidanceView: View {
             manager.arView.scene.anchors.forEach { $0.isEnabled = reliable }
             if wasReliable && !reliable {
                 announcer.haptic(.trackingLost)
-                if quality == .notAvailable || quality == .relocalizing {
+                // Not while an alert is up: UIKit refuses the second
+                // presentation and logs it once per frame forever.
+                if quality == .notAvailable || quality == .relocalizing, errorMessage == nil {
                     showRecovery = true
                 }
             }
@@ -170,6 +178,8 @@ struct GuidanceView: View {
                     profile = change.apply(to: profile)
                 } onAlternativeExit: {
                     reroute(for: profile, reason: "Finding another exit.")
+                } onClearReports: {
+                    clearOwnReports()
                 }
             }
         }
@@ -210,6 +220,22 @@ struct GuidanceView: View {
             errorMessage = error.localizedDescription
             DiagnosticsLog.shared.log("Reroute failed: \(error.localizedDescription)")
         }
+    }
+
+    /// True when this phone has reported hazards on this zone.
+    private var hasOwnReports: Bool {
+        !repository.store.loadHazards(zone.id).hazards.isEmpty
+    }
+
+    /// Undoes every hazard this phone reported for this zone and re-routes.
+    /// Only ever touches local reports — nothing an administrator published.
+    private func clearOwnReports() {
+        try? repository.store.clearHazards(zone.id)
+        DiagnosticsLog.shared.log("Cleared this device's hazard reports for zone \(zone.id)")
+        errorMessage = nil
+        rerouteNotice = "Your reports were cleared. Looking for a route again."
+        announcer.say("Reports cleared. Recalculating.", force: true)
+        reroute(for: profile, reason: "Reports cleared.")
     }
 
     /// Persists the hazard next to (not inside) the permanent graph, then

@@ -10,6 +10,8 @@ struct VoiceReportView: View {
     var onHazard: (RouteHazard, UUID) -> Void
     var onAccessibility: (NavigationProfileChange) -> Void
     var onAlternativeExit: () -> Void
+    /// Undoes this phone's own hazard reports. Nothing published is touched.
+    var onClearReports: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var listener = SpeechListener()
@@ -139,6 +141,19 @@ struct VoiceReportView: View {
                     dismiss()
                 } label: {
                     Label("Show other exits", systemImage: "checkmark.circle.fill")
+                }
+            }
+
+        case .clearMyReports:
+            Section("Understood") {
+                Label("Mark my reported blockages as clear", systemImage: "checkmark.seal")
+                Text("This only undoes what you reported on this phone. Closures published by an administrator are not affected.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button {
+                    onClearReports()
+                    dismiss()
+                } label: {
+                    Label("Clear my reports and reroute", systemImage: "checkmark.circle.fill")
                 }
             }
 

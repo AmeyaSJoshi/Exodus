@@ -98,9 +98,13 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     /// an explicit recovery screen over the AR view instead of black.
     private(set) var cameraFeed: CameraFeedState = .idle
     /// Timestamp of the most recent frame ARKit delivered.
-    private(set) var lastFrameTime: Date?
+    ///
+    /// Observation-ignored on purpose. These update on every single ARFrame;
+    /// publishing them made SwiftUI invalidate the whole AR overlay 60 times a
+    /// second, which is what starved RealityKit's renderer.
+    @ObservationIgnored private(set) var lastFrameTime: Date?
     /// Frames seen since the session last started. Diagnostic only.
-    private(set) var frameCount: Int = 0
+    @ObservationIgnored private(set) var frameCount: Int = 0
 
     /// Set once relocalization succeeds and saved anchors are matched.
     private(set) var restoredAnchorCount = 0
@@ -163,7 +167,7 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     /// Timestamp of the most recent frame RealityKit actually *rendered*.
     /// Distinguishes "the session stopped delivering" from "the session is
     /// fine but the renderer stopped", which look identical on screen.
-    private(set) var lastRenderTime: Date?
+    @ObservationIgnored private(set) var lastRenderTime: Date?
     private var renderSubscription: Cancellable?
     private var zone: MappingZone?
     private var markerAnchors: [UUID: AnchorEntity] = [:]
@@ -181,6 +185,14 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     /// Frames stop for a moment during normal operation; this is the point at
     /// which a gap stops being normal.
     static let frameStallSeconds: TimeInterval = 2.0
+    /// How often the camera pose reaches SwiftUI. 10 Hz is smooth for an
+    /// on-screen arrow and a sixth of the invalidation cost of every frame.
+    static let posePublishInterval: TimeInterval = 0.1
+    @ObservationIgnored private var lastPosePublish = Date.distantPast
+    /// The newest pose, regardless of what has been published. Routing reads
+    /// this so throttling the UI never costs accuracy.
+    @ObservationIgnored private(set) var latestPosition: SIMD3<Float> = .zero
+    @ObservationIgnored private(set) var latestHeading: Float = 0
     /// Identifies this manager in the log, so two live sessions are obvious.
     let instanceID = UUID()
 
@@ -423,7 +435,8 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
     // ARKit delivers these on the main queue by default (delegateQueue == nil).
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        lastFrameTime = Date()
+        let now = Date()
+        lastFrameTime = now
         frameCount += 1
         if cameraFeed != .active { cameraFeed = .active }
         currentMapping = frame.worldMappingStatus
@@ -436,8 +449,22 @@ final class ARSessionManager: NSObject, ARSessionDelegate {
         let t = frame.camera.transform
         let position = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
         let heading = atan2(-t.columns.2.x, -t.columns.2.z)
-        cameraPosition = position
-        cameraHeading = heading
+
+        // Routing and recording want every frame; the *interface* does not.
+        // These are `@Observable`, so assigning them at 60 Hz re-ran every AR
+        // overlay body — including the top-down map redrawing the whole path —
+        // on the main thread, on the same runloop RealityKit draws on. ARKit
+        // then queued frames it could not hand back ("the delegate is retaining
+        // 11 ARFrames") and the preview froze while the UI stayed responsive.
+        // Publishing at `posePublishInterval` is well above what a moving
+        // arrow needs and leaves the renderer its main-thread budget.
+        latestPosition = position
+        latestHeading = heading
+        if now.timeIntervalSince(lastPosePublish) >= Self.posePublishInterval {
+            lastPosePublish = now
+            cameraPosition = position
+            cameraHeading = heading
+        }
 
         if let start = relocalizeStart, mode == .relocalizing {
             let secs = Int(Date().timeIntervalSince(start))

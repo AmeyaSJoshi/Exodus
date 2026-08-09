@@ -173,9 +173,13 @@ enum RoutingError: LocalizedError, Equatable {
         case .noExitsOnMap:
             return "This map has no exit marked on it, so there is nothing to route to. Add an exit waypoint and publish again."
         case .allRoutesBlocked(let count):
+            // Deliberately does not name who blocked it. On a local map there
+            // is no administrator — the only person who could have marked
+            // anything is the user holding the phone, and telling them an
+            // administrator did it left them with nothing to act on.
             return count == 1
-                ? "The only way out from here is currently blocked by an administrator."
-                : "All \(count) routes out from here are currently blocked by an administrator."
+                ? "The only way out from here is currently marked as blocked."
+                : "All \(count) routes out from here are currently marked as blocked."
         case .startNotConnected(let startName):
             return "“\(startName)” is not connected to any exit on this map — nothing is blocked, the map is missing a link. Re-map the zone so this point joins a corridor that reaches an exit."
         case .noAccessibleRoute(let constraints):
