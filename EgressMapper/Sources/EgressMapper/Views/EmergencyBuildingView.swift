@@ -521,12 +521,14 @@ struct EvacuationView: View {
 
     private var mapSection: some View {
         Section {
-            LiveGraphMapView(
+            EvacuationMapPanel(
                 graph: effectiveGraph ?? BuildingGraph(zoneID: building.id, nodes: [], edges: []),
                 route: options?.best.nodes ?? [],
-                startNodeID: startNodeID
+                currentNodeID: startNodeID,
+                nextNodeID: (options?.best.nodes.count ?? 0) > 1 ? options?.best.nodes[1].id : nil,
+                remainingDistance: options?.best.totalDistanceMeters
             )
-            .frame(height: 240)
+            .frame(height: 260)
             .listRowInsets(EdgeInsets())
         }
     }

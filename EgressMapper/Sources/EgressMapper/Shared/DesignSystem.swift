@@ -394,21 +394,37 @@ struct EGMapLabelLayout {
     private static let offsets: [CGFloat] = [-14, -26, 18, 30, -38, 42]
 
     /// The point to draw `text` centred on, given the node's screen position.
-    mutating func position(for text: String, at point: CGPoint, fontSize: CGFloat) -> CGPoint {
+    ///
+    /// Pass `within` to keep captions inside the canvas: a node near the left
+    /// edge would otherwise centre its name off-screen and render as "Vest
+    /// Exit".
+    mutating func position(
+        for text: String, at point: CGPoint, fontSize: CGFloat, within canvas: CGSize? = nil
+    ) -> CGPoint {
         // Canvas cannot measure text, so approximate: 0.58em average advance.
         let width = CGFloat(text.count) * fontSize * 0.58 + 6
         let height = fontSize + 4
+
+        var x = point.x
+        if let canvas {
+            let half = width / 2
+            // Only clamps when the caption would actually leave the canvas, so
+            // labels stay centred on their node wherever there is room.
+            x = min(max(x, half + 2), max(half + 2, canvas.width - half - 2))
+        }
+
         for dy in Self.offsets {
-            let rect = CGRect(
-                x: point.x - width / 2, y: point.y + dy - height / 2,
-                width: width, height: height
-            )
+            var y = point.y + dy
+            if let canvas {
+                y = min(max(y, height / 2 + 2), max(height / 2 + 2, canvas.height - height / 2 - 2))
+            }
+            let rect = CGRect(x: x - width / 2, y: y - height / 2, width: width, height: height)
             if !placed.contains(where: { $0.intersects(rect) }) {
                 placed.append(rect)
-                return CGPoint(x: point.x, y: point.y + dy)
+                return CGPoint(x: x, y: y)
             }
         }
-        return CGPoint(x: point.x, y: point.y + Self.offsets[0])
+        return CGPoint(x: x, y: point.y + Self.offsets[0])
     }
 }
 

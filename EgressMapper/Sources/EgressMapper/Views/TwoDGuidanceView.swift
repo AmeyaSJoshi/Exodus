@@ -29,8 +29,13 @@ struct TwoDGuidanceView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            LiveGraphMapView(graph: graph, route: route.nodes, startNodeID: startNodeID)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            EvacuationMapView(
+                graph: graph,
+                route: route.nodes,
+                currentNodeID: startNodeID,
+                nextNodeID: route.nodes.count > 1 ? route.nodes[1].id : nil
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             steplist
         }
         .background(Color.black.ignoresSafeArea())

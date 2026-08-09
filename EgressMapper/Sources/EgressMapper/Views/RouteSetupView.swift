@@ -120,15 +120,31 @@ struct RouteSetupView: View {
         }
     }
 
+    @ViewBuilder
     private var previewSection: some View {
         Section {
-            TopDownRouteView(
-                path: path,
-                waypoints: waypoints,
-                highlightedRoute: route
-            )
-            .frame(height: 220)
-            .listRowInsets(EdgeInsets())
+            // The routable graph is what evacuation actually follows, so route
+            // testing previews the same map an occupant would see. The recorded
+            // walk is only shown when there is no graph to route on yet.
+            if let graph {
+                EvacuationMapPanel(
+                    graph: graph,
+                    route: route,
+                    currentNodeID: startPosition?.nodeID ?? start?.id,
+                    nextNodeID: route.count > 1 ? route[1].id : nil,
+                    remainingDistance: calculated?.totalDistanceMeters
+                )
+                .frame(height: 260)
+                .listRowInsets(EdgeInsets())
+            } else {
+                TopDownRouteView(
+                    path: path,
+                    waypoints: waypoints,
+                    highlightedRoute: route
+                )
+                .frame(height: 220)
+                .listRowInsets(EdgeInsets())
+            }
         } header: {
             Text("Preview")
         }
