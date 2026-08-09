@@ -17,6 +17,8 @@ targets:
         UILaunchScreen: {}
         NSCameraUsageDescription: EGRESS Mapper uses the camera for AR indoor mapping and navigation. Camera frames are processed on device and are never uploaded.
         NSPhotoLibraryUsageDescription: Import a floor plan image to align with a recorded route.
+        NSMicrophoneUsageDescription: EGRESS Mapper listens only while you hold the voice-report button, so you can report a blocked route without typing.
+        NSSpeechRecognitionUsageDescription: Spoken reports are converted to text on device to understand phrases like "the hallway ahead is blocked".
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:
