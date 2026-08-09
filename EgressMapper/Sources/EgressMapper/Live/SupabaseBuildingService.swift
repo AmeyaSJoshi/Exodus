@@ -95,6 +95,43 @@ final class SupabaseBuildingService: BuildingStateService {
         )
     }
 
+    /// Deletes a building and every version of its map for the whole
+    /// organization. Storage objects go first: once the rows are gone their
+    /// paths are unknown, and orphaned binaries would sit in the bucket
+    /// forever. The RPC re-checks authorization server-side regardless.
+    func deleteBuilding(id: UUID) async throws {
+        guard let client else { throw BackendError.notConfigured }
+
+        let objects = try? await client.storage
+            .from(MapArtifactBucket.name)
+            .list(path: id.uuidString)
+        if let objects, !objects.isEmpty {
+            // `list` is shallow, so recurse one level: paths are
+            // <building>/<version>/<file>.
+            var paths: [String] = []
+            for entry in objects {
+                let nested = try? await client.storage
+                    .from(MapArtifactBucket.name)
+                    .list(path: "\(id.uuidString)/\(entry.name)")
+                for file in nested ?? [] {
+                    paths.append("\(id.uuidString)/\(entry.name)/\(file.name)")
+                }
+            }
+            if !paths.isEmpty {
+                _ = try? await client.storage.from(MapArtifactBucket.name).remove(paths: paths)
+            }
+        }
+
+        _ = try await client
+            .rpc("delete_building", params: ["p_building_id": id.uuidString])
+            .execute()
+
+        catalog.removeAll { $0.id == id }
+        cachedVersions[id] = nil
+        try await loadCatalog()
+        DiagnosticsLog.shared.log("Deleted building \(id.uuidString.prefix(8))")
+    }
+
     /// Records that this device now holds `version` of a building's map.
     func markCached(buildingID: UUID, version: Int?) {
         guard let version else { return }

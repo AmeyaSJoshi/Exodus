@@ -19,6 +19,8 @@ struct SavedMapsView: View {
     @State private var renaming: MappingZone?
     @State private var renameText = ""
     @State private var pendingDelete: MappingZone?
+    @State private var pendingBuildingDelete: CatalogBuilding?
+    @State private var deleting = false
 
     private var entries: [BuildingEntry] {
         session.entries(localZones: repository.zones)
@@ -70,7 +72,10 @@ struct SavedMapsView: View {
                     }
                     .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                     .swipeActions(edge: .trailing) {
-                        if let zone = entry.localZone, session.canManage {
+                        // Same gate as the row's own actions, so a signed-out
+                        // device can still delete a recording it made.
+                        if let zone = entry.localZone,
+                           entry.actions(for: session.profile).contains(.deleteLocalMap) {
                             Button(role: .destructive) { pendingDelete = zone } label: {
                                 Label("Delete", systemImage: "trash")
                             }
@@ -125,6 +130,21 @@ struct SavedMapsView: View {
         } message: {
             Text("This removes the world map, waypoints and recorded path stored on this device for “\(pendingDelete?.displayTitle ?? "")”. Anything already published stays published.")
         }
+        .alert("Delete Building?", isPresented: .constant(pendingBuildingDelete != nil)) {
+            Button("Cancel", role: .cancel) { pendingBuildingDelete = nil }
+            Button("Delete for Everyone", role: .destructive) {
+                if let building = pendingBuildingDelete {
+                    deleting = true
+                    Task {
+                        await session.deleteBuilding(building)
+                        deleting = false
+                    }
+                }
+                pendingBuildingDelete = nil
+            }
+        } message: {
+            Text("This permanently removes “\(pendingBuildingDelete?.name ?? "")”, every published version of its map and its live closures, for everyone in your organization. Occupants will no longer see it. Local recordings on this device are kept.")
+        }
         .alert("Rename Map", isPresented: .constant(renaming != nil)) {
             TextField("Name", text: $renameText)
             Button("Cancel", role: .cancel) { renaming = nil }
@@ -159,6 +179,10 @@ struct SavedMapsView: View {
             else { openZone = entry.localZone }
         case .viewBuilding, .viewPublicationState:
             detailEntry = entry
+        case .deleteLocalMap:
+            pendingDelete = entry.localZone
+        case .deleteBuilding:
+            pendingBuildingDelete = entry.remote
         }
     }
 }

@@ -245,3 +245,69 @@ final class SavedMapsMergeTests: XCTestCase {
         XCTAssertEqual(entries.map(\.name), ["Anderson", "Science", "Wade"])
     }
 }
+
+// MARK: - Deleting
+
+final class SavedMapsDeleteTests: XCTestCase {
+
+    func testAMapperCanDeleteBothTheLocalMapAndTheBuilding() {
+        let profile = admin()
+        let building = published("Wade")
+        let actions = BuildingCatalogMerger.merge(
+            remote: [building], localZones: [localZone("Wade", remote: building.id)],
+            cachedVersion: { _ in 1 }, profile: profile
+        )[0].actions(for: profile)
+
+        XCTAssertTrue(actions.contains(.deleteLocalMap))
+        XCTAssertTrue(actions.contains(.deleteBuilding))
+    }
+
+    /// Deleting a building is a server write; a device with no account may
+    /// only remove its own recording.
+    func testASignedOutDeviceCanDeleteItsRecordingButNotABuilding() {
+        let entry = BuildingCatalogMerger.merge(
+            remote: [], localZones: [localZone("Half-mapped Hall")],
+            cachedVersion: { _ in nil }, profile: .empty
+        )[0]
+        let actions = entry.actions(for: .empty)
+
+        XCTAssertTrue(actions.contains(.deleteLocalMap))
+        XCTAssertFalse(actions.contains(.deleteBuilding))
+    }
+
+    func testAnOccupantIsNeverOfferedEitherDelete() {
+        let profile = student()
+        let building = published("Wade")
+        for cache in [nil, 1] as [Int?] {
+            let actions = BuildingCatalogMerger.merge(
+                remote: [building], localZones: [], cachedVersion: { _ in cache }, profile: profile
+            )[0].actions(for: profile)
+            XCTAssertFalse(actions.contains(.deleteBuilding))
+            XCTAssertFalse(actions.contains(.deleteLocalMap))
+            // Removing their own download is fine — it touches nothing shared.
+            if cache != nil { XCTAssertTrue(actions.contains(.removeDownload)) }
+        }
+    }
+
+    func testBothDeletesAreTreatedAsWriteActions() {
+        XCTAssertTrue(BuildingAction.deleteBuilding.requiresManageRole)
+        XCTAssertTrue(BuildingAction.deleteLocalMap.requiresManageRole)
+        XCTAssertFalse(BuildingAction.removeDownload.requiresManageRole)
+    }
+
+    func testDeleteActionsAreOrderedLastSoTheyAreNotHitByAccident() {
+        let profile = admin()
+        let building = published("Wade")
+        let actions = BuildingCatalogMerger.merge(
+            remote: [building], localZones: [localZone("Wade", remote: building.id)],
+            cachedVersion: { _ in 1 }, profile: profile
+        )[0].actions(for: profile)
+
+        let firstDelete = actions.firstIndex { $0 == .deleteLocalMap || $0 == .deleteBuilding }
+        XCTAssertNotNil(firstDelete)
+        XCTAssertTrue(
+            actions[..<firstDelete!].contains(.useInEmergency),
+            "destructive actions must sit after the ones used in an emergency"
+        )
+    }
+}
